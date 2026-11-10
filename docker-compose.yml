@@ -1,0 +1,138 @@
+# Development stack. Usage: copy .env.example to .env, then `docker compose up --build`.
+name: attendance-dev
+
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-attendance}
+      POSTGRES_USER: ${POSTGRES_USER:-attendance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  valkey:
+    image: valkey/valkey:8.0-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in .env}"]
+    ports:
+      - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkeydata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+
+  api:
+    build:
+      context: ./apps/api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: '["http://localhost:${WEB_PORT:-3000}"]'
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-attendance}
+      POSTGRES_USER: ${POSTGRES_USER:-attendance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      DATA_ENCRYPTION_KEYS: ${DATA_ENCRYPTION_KEYS:?Set DATA_ENCRYPTION_KEYS in .env}
+      JWT_SIGNING_KEYS: ${JWT_SIGNING_KEYS:?Set JWT_SIGNING_KEYS in .env}
+      CAMERA_SERVICE_URL: http://camera:8200
+      CAMERA_SERVICE_TOKEN: ${CAMERA_SERVICE_TOKEN:-}
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - ./apps/api:/app
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  web:
+    image: node:24-alpine
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev -- --hostname 0.0.0.0 --port 3000"
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:${API_PORT:-8000}
+      WATCHPACK_POLLING: "true"   # reliable hot reload on Windows bind mounts
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    volumes:
+      - ./apps/web:/app
+      - web_node_modules:/app/node_modules
+      - web_next:/app/.next
+
+  # Face recognition service: evaluation phase only, NOT connected to attendance.
+  # Opt-in: docker compose --profile recognition up --build recognition
+  recognition:
+    profiles: ["recognition"]
+    build:
+      context: ./apps/recognition
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      MODELS_DIR: /models
+      MANIFEST_PATH: /models/manifest.yaml
+      SERVICE_TOKEN: ${RECOGNITION_SERVICE_TOKEN:-}  # required: the service refuses to start without a strong token
+      DATA_ENCRYPTION_KEYS: ${DATA_ENCRYPTION_KEYS:?Set DATA_ENCRYPTION_KEYS in .env}
+    ports:
+      - "127.0.0.1:${RECOGNITION_PORT:-8100}:8100"
+    volumes:
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # Camera integration service (Phase 10). Opt-in: docker compose --profile cameras up --build camera
+  # USB webcams need a device mapping (devices: ["/dev/video0:/dev/video0"]) on Linux hosts.
+  camera:
+    profiles: ["cameras"]
+    build:
+      context: ./apps/camera
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      APP_ENV: development
+      SERVICE_TOKEN: ${CAMERA_SERVICE_TOKEN:-}  # required (>= 24 chars); same value as the api uses
+      CORE_API_URL: http://api:8000
+      TEST_MEDIA_DIR: /media
+    ports:
+      - "127.0.0.1:${CAMERA_PORT:-8200}:8200"
+    volumes:
+      - ./data/test-media:/media:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  valkeydata:
+  web_node_modules:
+  web_next:

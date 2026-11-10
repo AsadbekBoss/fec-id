@@ -1,0 +1,23 @@
+[project]
+name = "attendance-recognition"
+version = "0.1.0"
+description = "AI Employee Attendance - face recognition service (evaluation phase, not connected)"
+requires-python = ">=3.12,<3.15"
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S311"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

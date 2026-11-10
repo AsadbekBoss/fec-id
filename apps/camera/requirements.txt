@@ -1,0 +1,8 @@
+# Camera integration service (Phase 10). Pinned; Python 3.12-3.14.
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+fastapi==0.162.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.2
+httpx==0.28.1

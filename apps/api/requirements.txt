@@ -1,0 +1,15 @@
+# Runtime dependencies — pinned exact versions. Compatible with Python 3.12–3.14.
+fastapi==0.162.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.2
+sqlalchemy[asyncio]==2.1.8
+asyncpg==0.32.0
+cryptography==50.0.2
+alembic==1.20.1
+argon2-cffi==25.1.0
+pyjwt==2.15.1
+pillow==13.0.0
+python-multipart==0.0.33
+# IANA time zones for zoneinfo (Windows and slim Docker images ship none)
+tzdata==2026.6
