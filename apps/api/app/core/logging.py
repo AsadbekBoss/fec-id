@@ -14,6 +14,8 @@ _REDACTIONS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"),
         r"\g<scheme>***:***@",
     ),
+    # Telegram bot tokens inside Bot API URLs: https://api.telegram.org/bot123456:ABC.../sendMessage
+    (re.compile(r"bot\d{5,}:[A-Za-z0-9_-]{20,}"), "bot***"),
     # bearer tokens / JWTs
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer ***"),
     (re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"), "***jwt***"),

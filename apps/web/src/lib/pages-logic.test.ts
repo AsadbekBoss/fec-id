@@ -9,7 +9,7 @@ import { treeOrder } from "@/components/entities";
 import { validateEmployee } from "@/app/(app)/employees/employee-form";
 
 const day = (over: Partial<Day> & { id?: string; name?: string }): Day => ({
-  employee: { id: over.id ?? "e1", employee_code: "E1", full_name: over.name ?? "Karimov Aziz", department_id: "d" },
+  employee: { id: over.id ?? "e1", employee_code: "E1", full_name: over.name ?? "Karimov Aziz", department_id: "d", has_photo: false, photo_updated_at: null },
   work_date: "2026-11-02",
   status: "PRESENT",
   in_progress: false,
@@ -123,7 +123,7 @@ describe("server error mapping", () => {
 
 describe("department tree", () => {
   const dep = (id: string, name: string, parent: string | null): Department => ({
-    id, name, parent_id: parent, code: null, head_employee_id: null, work_schedule_id: null, employee_count: 0, created_at: "", updated_at: "",
+    id, branch_id: "b1", name, parent_id: parent, code: null, head_employee_id: null, work_schedule_id: null, employee_count: 0, created_at: "", updated_at: "",
   });
   it("orders parents before children with depth", () => {
     const t = treeOrder([dep("c", "IT", "a"), dep("a", "Markaz", null), dep("b", "Buxgalteriya", "a"), dep("x", "Orphan", "missing")]);

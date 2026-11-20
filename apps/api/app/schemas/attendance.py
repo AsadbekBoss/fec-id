@@ -107,6 +107,7 @@ class WorkScheduleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    branch_id: uuid.UUID
     name: str
     timezone: str
     start_time: time
@@ -207,6 +208,9 @@ class EmployeeBrief(BaseModel):
     employee_code: str
     full_name: str
     department_id: uuid.UUID
+    # Profile photo (identification in the UI only): GET /employees/{id}/photo when true.
+    has_photo: bool = False
+    photo_updated_at: datetime | None = None
 
 
 class DayOut(BaseModel):

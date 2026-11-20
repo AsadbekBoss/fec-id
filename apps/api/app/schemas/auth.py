@@ -37,6 +37,7 @@ class UserOut(BaseModel):
     username: str
     email: str | None
     role: UserRole
+    branch_id: uuid.UUID
     is_active: bool
     locale: str
     last_login_at: datetime | None
@@ -65,10 +66,18 @@ class SessionInfo(BaseModel):
     expires_at: datetime
 
 
+class BranchRef(BaseModel):
+    id: uuid.UUID
+    name: str
+
+
 class MeResponse(BaseModel):
     user: UserOut
     permissions: list[str]
     session: SessionInfo
+    # The user's own branch; `all_branches` = may see / switch between every branch.
+    branch: BranchRef
+    all_branches: bool
 
 
 class ChangePasswordRequest(StrictModel):
@@ -80,12 +89,15 @@ class UserCreate(StrictModel):
     username: Username
     password: Password
     role: UserRole
+    # Branch the user works in (default: the selected branch, else the main one).
+    branch_id: uuid.UUID | None = None
     email: Email | None = None
     locale: Locale = "uz"
 
 
 class UserUpdate(StrictModel):
     role: UserRole | None = None
+    branch_id: uuid.UUID | None = None
     is_active: bool | None = None
     email: Email | None = None
     locale: Locale | None = None

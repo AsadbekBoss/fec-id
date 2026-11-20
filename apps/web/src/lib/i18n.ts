@@ -19,6 +19,8 @@ export const uz = {
     reports: "Hisobotlar",
     users: "Administratorlar",
     settings: "Sozlamalar",
+    system: "Tizim holati",
+    branches: "Filiallar",
     designSystem: "Dizayn tizimi",
     sectionMain: "Asosiy",
     sectionOrg: "Tashkilot",

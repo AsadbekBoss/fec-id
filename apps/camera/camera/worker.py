@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from camera.health import Measurements, assess, codec_name
 from camera.providers.base import ErrorCode, FrameSource, ProviderError, StreamInfo
 from camera.spec import SourceSpec, redact
 
@@ -63,6 +64,11 @@ class WorkerStats:
     last_frame_at: datetime | None = None
     grab_times: deque[float] = field(default_factory=lambda: deque(maxlen=300))
     recent_failures: deque[float] = field(default_factory=lambda: deque(maxlen=100))
+    # health windows (never cleared on reconnect)
+    failure_times: deque[float] = field(default_factory=lambda: deque(maxlen=5000))
+    reconnect_times: deque[float] = field(default_factory=lambda: deque(maxlen=200))
+    cpu_percent: float | None = None  # this worker thread, % of one core
+    cpu_mark: tuple[float, float] | None = None  # (wall, thread cpu) at the last sample
 
 
 class CameraWorker(threading.Thread):
@@ -94,6 +100,13 @@ class CameraWorker(threading.Thread):
         if self.is_alive() and threading.current_thread() is not self:
             self.join(timeout)
         self.state = "STOPPED"
+
+    def latest_with_time(self, max_age: float = 5.0) -> tuple[np.ndarray, float] | None:
+        """The latest frame (not copied: read-only use) and its monotonic capture time."""
+        with self._lock:
+            if self._latest is None or time.monotonic() - self._latest[1] > max_age:
+                return None
+            return self._latest
 
     def latest_frame(self, max_age: float = 5.0) -> np.ndarray | None:
         with self._lock:
@@ -139,6 +152,35 @@ class CameraWorker(threading.Thread):
             "uptime_seconds": round(now - st.connected_at, 1)
             if st.connected_at and self.state in ("ONLINE", "DEGRADED")
             else None,
+            **self.health(now),
+        }
+
+    def health(self, now: float | None = None) -> dict[str, Any]:
+        now = time.monotonic() if now is None else now
+        st = self.stats
+        codec = codec_name(self.info.codec)
+        failures_5m = sum(1 for t in list(st.failure_times) if now - t <= 300)
+        reconnects_1h = sum(1 for t in list(st.reconnect_times) if now - t <= 3600)
+        fps = self.measured_fps()
+        uptime = now - st.connected_at if st.connected_at else None
+        m = Measurements(
+            provider=str(getattr(self.spec.provider, "value", self.spec.provider)),
+            state=self.state,
+            uptime_seconds=uptime,
+            width=self.info.width,
+            height=self.info.height,
+            codec=codec,
+            measured_fps=fps,
+            cpu_percent=st.cpu_percent,
+            failures_5m=failures_5m,
+            reconnects_1h=reconnects_1h,
+        )
+        return {
+            "codec": codec,
+            "cpu_percent": st.cpu_percent,
+            "failures_5m": failures_5m,
+            "reconnects_1h": reconnects_1h,
+            "health": assess(m),
         }
 
     # --- thread -------------------------------------------------------------------------------
@@ -165,6 +207,7 @@ class CameraWorker(threading.Thread):
             if self._stop.is_set():
                 break
             self.stats.reconnects += 1
+            self.stats.reconnect_times.append(time.monotonic())
             self._stop.wait(self.backoff.next_delay())
         self.state = "STOPPED"
 
@@ -191,6 +234,7 @@ class CameraWorker(threading.Thread):
             if not source.grab():
                 self.stats.read_failures += 1
                 self.stats.recent_failures.append(now)
+                self.stats.failure_times.append(now)
                 if now - last_ok > self.stall_timeout:
                     raise ProviderError(ErrorCode.STREAM_LOST, f"no frame for {self.stall_timeout:.0f} s")
                 self._stop.wait(0.05)
@@ -204,6 +248,7 @@ class CameraWorker(threading.Thread):
                 if frame is None:
                     self.stats.read_failures += 1
                     self.stats.recent_failures.append(now)
+                    self.stats.failure_times.append(now)
                     continue
                 self._publish(frame, now)
                 if first:
@@ -228,7 +273,18 @@ class CameraWorker(threading.Thread):
             except Exception:
                 log.exception("frame consumer failed")
 
+    def _sample_cpu(self, now: float) -> None:
+        """CPU of THIS thread (grab + decode happen here), measured every 5 s."""
+        cpu = time.thread_time()
+        mark = self.stats.cpu_mark
+        if mark is None:
+            self.stats.cpu_mark = (now, cpu)
+        elif now - mark[0] >= 5.0:
+            self.stats.cpu_percent = round(100.0 * (cpu - mark[1]) / (now - mark[0]), 1)
+            self.stats.cpu_mark = (now, cpu)
+
     def _update_state(self, now: float) -> None:
+        self._sample_cpu(now)
         if self.stats.frames_total == 0:
             return
         recent = sum(1 for t in self.stats.recent_failures if now - t < 10)

@@ -6,6 +6,7 @@ import base64
 import io
 import struct
 import uuid
+from collections.abc import AsyncIterator
 from datetime import date
 from typing import Any
 
@@ -17,6 +18,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.errors import AppError
 from app.core.config import get_settings
 from app.models import AuditLog, FaceEmbedding
 from app.models.enums import AttendanceMethod, EmployeeStatus, UserRole
@@ -62,6 +64,17 @@ class FakeRecognition:
         self.calls += 1
         return self.result
 
+    async def quality(self, image: bytes) -> dict[str, Any]:
+        quality = {"passed": True, "reasons": [], "face_width_px": 160.0, "yaw_deg": -15.2}
+        small = {**quality, "passed": False, "reasons": ["too_small"], "face_width_px": 40.0}
+        return {
+            "image_size": [640, 480],
+            "faces": [
+                {"box": [320, 120, 160, 200], "quality": quality},
+                {"box": [10, 10, 40, 50], "quality": small},
+            ],
+        }
+
 
 class FakeCameras:
     def __init__(self) -> None:
@@ -72,6 +85,22 @@ class FakeCameras:
 
     async def observations(self, since: int, camera_id: str | None) -> dict[str, Any]:
         return self.obs
+
+    live = True
+
+    async def stream(
+        self, spec: dict[str, Any], fps: float, max_side: int, seconds: int
+    ) -> tuple[str, AsyncIterator[bytes]]:
+        if not self.live:
+            raise AppError(409, "CAMERA_NOT_LIVE", "Camera not monitored", "monitoring off")
+        self.stream_args = (fps, max_side, seconds)
+        part = b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 3\r\n\r\nabc\r\n"
+
+        async def chunks() -> AsyncIterator[bytes]:
+            for _ in range(3):
+                yield part
+
+        return "multipart/x-mixed-replace; boundary=frame", chunks()
 
 
 @pytest.fixture
@@ -366,3 +395,129 @@ async def test_live_view_names_only_confident_matches(
     assert obs[1]["employee"] is None and "employee_id" not in obs[1]  # uncertain: anonymous
     assert obs[2]["employee"] is None
     assert r.json()["cameras"][0]["name"] == "Gate 1"
+
+
+# --- guided enrolment ------------------------------------------------------------------------
+
+
+async def test_scan_frame_preview_box_pose_and_audit(
+    api: httpx.AsyncClient,
+    session: AsyncSession,
+    admin: Any,
+    rec: FakeRecognition,
+    cams: FakeCameras,
+) -> None:
+    h, acc = admin
+    emp = await _ready_employee(session, acc.obj)
+    cam = await f.camera(session)
+    url = f"{_url(emp)}/scan-frame"
+    for _ in range(3):
+        r = await api.post(url, json={"camera_id": str(cam.id)}, headers=h)
+        assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["preview"].startswith("data:image/jpeg;base64,")
+    img = Image.open(io.BytesIO(base64.b64decode(body["preview"].split(",", 1)[1])))
+    assert max(img.size) <= 480  # downscaled preview
+    assert body["faces"] == 2
+    assert body["face"]["box"] == [0.5, 0.25, 0.25, 0.4167]  # largest face, fractions
+    assert body["face"]["yaw_deg"] == -15.2 and body["face"]["passed"] is True
+    assert "embedding" not in r.text and rec.calls == 0  # never extracts or identifies
+    q = select(AuditLog).where(AuditLog.action == "ENROLMENT_PREVIEW_VIEWED")
+    assert len((await session.execute(q)).scalars().all()) == 1  # throttled while polling
+
+
+@pytest.mark.parametrize(
+    ("pose", "sign", "yaw", "problem"),
+    [
+        ("frontal", None, 20.0, "not_frontal"),
+        ("turned", None, 4.0, "not_turned"),
+        ("turned", -1, 18.0, "wrong_side"),
+        ("frontal", None, None, "pose_unknown"),
+    ],
+)
+async def test_from_camera_rejects_wrong_pose(
+    api: httpx.AsyncClient,
+    session: AsyncSession,
+    admin: Any,
+    rec: FakeRecognition,
+    cams: FakeCameras,
+    pose: str,
+    sign: int | None,
+    yaw: float | None,
+    problem: str,
+) -> None:
+    h, acc = admin
+    emp = await _ready_employee(session, acc.obj)
+    cam = await f.camera(session)
+    rec.result = {**FakeRecognition.ok(), "yaw_deg": yaw}
+    body: dict[str, Any] = {"camera_id": str(cam.id), "pose": pose}
+    if sign is not None:
+        body["yaw_sign"] = sign
+    r = await api.post(f"{_url(emp)}/from-camera", json=body, headers=h)
+    assert r.status_code == 422 and r.json()["code"] == "POSE_MISMATCH"
+    assert r.json()["errors"][0]["code"] == problem
+    assert (await session.execute(select(FaceEmbedding))).scalars().all() == []
+
+
+async def test_from_camera_accepts_matching_pose_and_returns_yaw(
+    api: httpx.AsyncClient,
+    session: AsyncSession,
+    admin: Any,
+    rec: FakeRecognition,
+    cams: FakeCameras,
+) -> None:
+    h, acc = admin
+    emp = await _ready_employee(session, acc.obj)
+    cam = await f.camera(session)
+    rec.result = {**FakeRecognition.ok(), "yaw_deg": 17.5}
+    body = {"camera_id": str(cam.id), "pose": "turned", "yaw_sign": 1}
+    r = await api.post(f"{_url(emp)}/from-camera", json=body, headers=h)
+    assert r.status_code == 201, r.text
+    assert r.json()["yaw_deg"] == 17.5
+
+
+async def test_scan_frame_needs_biometrics_write(
+    api: httpx.AsyncClient, session: AsyncSession, cams: FakeCameras, rec: FakeRecognition
+) -> None:
+    viewer = bearer(await token_for(api, await make_user(session, role=UserRole.VIEWER)))
+    r = await api.post(
+        f"/api/v1/employees/{uuid.uuid4()}/face-templates/scan-frame",
+        json={"camera_id": str(uuid.uuid4())},
+        headers=viewer,
+    )
+    assert r.status_code == 403
+
+
+async def test_scan_stream_relays_mjpeg_and_audits(
+    api: httpx.AsyncClient, session: AsyncSession, admin: Any, cams: FakeCameras
+) -> None:
+    h, acc = admin
+    emp = await _ready_employee(session, acc.obj)
+    cam = await f.camera(session)
+    r = await api.get(f"{_url(emp)}/scan-stream", params={"camera_id": str(cam.id)}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "multipart/x-mixed-replace; boundary=frame"
+    assert r.headers["cache-control"] == "no-store"
+    assert r.content.count(b"--frame") == 3
+    assert cams.stream_args == (15, 640, 120)
+    q = select(AuditLog).where(AuditLog.action == "ENROLMENT_PREVIEW_VIEWED")
+    assert len((await session.execute(q)).scalars().all()) == 1
+    cams.live = False
+    r = await api.get(f"{_url(emp)}/scan-stream", params={"camera_id": str(cam.id)}, headers=h)
+    assert r.status_code == 409 and r.json()["code"] == "CAMERA_NOT_LIVE"
+
+
+async def test_scan_frame_without_preview(
+    api: httpx.AsyncClient,
+    session: AsyncSession,
+    admin: Any,
+    rec: FakeRecognition,
+    cams: FakeCameras,
+) -> None:
+    h, acc = admin
+    emp = await _ready_employee(session, acc.obj)
+    cam = await f.camera(session)
+    body = {"camera_id": str(cam.id), "preview": False}
+    r = await api.post(f"{_url(emp)}/scan-frame", json=body, headers=h)
+    assert r.status_code == 200 and r.json()["preview"] is None
+    assert r.json()["face"]["yaw_deg"] == -15.2

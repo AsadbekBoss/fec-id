@@ -24,6 +24,9 @@ def test_redaction_of_credentials() -> None:
     assert "secret123" not in redact("rtsp://admin:secret123@10.0.0.5:554/Streams/Channels/101")
     assert "abc.def" not in redact("Authorization: Bearer abc.def.ghi")
     assert "hunter2" not in redact("password=hunter2")
+    tg = "HTTP Request: POST https://api.telegram.org/bot1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage"
+    assert "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw" not in redact(tg)
+    assert "/bot***/sendMessage" in redact(tg)
     rec = logging.LogRecord(
         "t", logging.INFO, __file__, 1, "postgres_password: hunter2", None, None
     )

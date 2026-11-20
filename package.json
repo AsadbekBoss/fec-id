@@ -11,6 +11,12 @@
     "dev": "node tools/dev.mjs",
     "dev:web": "npm --prefix apps/web run dev",
     "dev:api": "node tools/dev.mjs api",
+    "start": "node tools/run.mjs",
+    "start:dev": "node tools/run.mjs --dev",
+    "stop": "node tools/run.mjs --stop",
+    "status": "node tools/run.mjs --status",
+    "autostart": "node tools/autostart.mjs",
+    "autostart:remove": "node tools/autostart.mjs --remove",
     "lint": "npm --prefix apps/web run lint && node tools/py.mjs -m ruff check . && npm run lint:rec && npm run lint:cam",
     "typecheck": "npm --prefix apps/web run typecheck && node tools/py.mjs -m mypy app && npm run typecheck:rec && npm run typecheck:cam",
     "test": "npm --prefix apps/web run test && node tools/py.mjs -m pytest -q && npm run test:rec && npm run test:cam",
@@ -39,6 +45,11 @@
     "cam:dev": "node tools/svc.mjs camera -m uvicorn camera.api:create_app --factory --host 127.0.0.1 --port 8200",
     "test:cam": "node tools/svc.mjs camera -m pytest -q",
     "lint:cam": "node tools/svc.mjs camera -m ruff check camera tests",
-    "typecheck:cam": "node tools/svc.mjs camera -m mypy camera"
+    "typecheck:cam": "node tools/svc.mjs camera -m mypy camera",
+    "backup": "node tools/py.mjs -m app.cli backup",
+    "backup:verify": "node tools/py.mjs -m app.cli backup-verify",
+    "backup:restore": "node tools/py.mjs -m app.cli backup-restore",
+    "backup:keys": "node tools/py.mjs -m app.cli backup-keys",
+    "backup:schedule": "node tools/backup-schedule.mjs"
   }
 }

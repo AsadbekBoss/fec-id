@@ -25,6 +25,11 @@ class Permission(StrEnum):
     ATTENDANCE_READ = "attendance:read"
     ATTENDANCE_WRITE = "attendance:write"
     REPORTS_READ = "reports:read"
+    # Telegram recipients of the user's branch (the bot itself and global switches: SETTINGS_*).
+    NOTIFICATIONS_READ = "notifications:read"
+    NOTIFICATIONS_WRITE = "notifications:write"
+    # Every branch at once: create branches, system status, cross-branch data (SUPER_ADMIN only).
+    BRANCHES_MANAGE = "branches:manage"
 
 
 P = Permission
@@ -40,6 +45,8 @@ _ADMIN = _VIEWER | frozenset(
         P.BIOMETRICS_READ,
         P.BIOMETRICS_WRITE,
         P.ATTENDANCE_WRITE,
+        P.NOTIFICATIONS_READ,
+        P.NOTIFICATIONS_WRITE,
     }
 )
 _SUPER_ADMIN = frozenset(Permission)

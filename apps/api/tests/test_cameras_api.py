@@ -370,6 +370,17 @@ async def test_internal_config_and_status_flow(
         "measured_fps": 14.8,
         "frames_total": 300,
         "reconnects": 0,
+        "codec": "H.265",
+        "cpu_percent": 55.0,
+        "failures_5m": 40,
+        "reconnects_1h": 0,
+        "health": {
+            "verdict": "warn",
+            "issues": [
+                {"code": "frame_loss", "severity": "warn", "count": 40},
+                {"code": "h265", "severity": "warn"},
+            ],
+        },
     }
     r = await api.post(
         "/internal/v1/cameras/status", json={"reports": [report]}, headers=service_token
@@ -378,6 +389,12 @@ async def test_internal_config_and_status_flow(
     out = (await api.get(f"{BASE}/{cam['id']}", headers=admin)).json()
     assert out["status"] == "ACTIVE" and out["monitoring"]["stale"] is False
     assert out["monitoring"]["runtime"]["measured_fps"] == 14.8
+    health = out["monitoring"]["runtime"]["health"]
+    assert health["verdict"] == "warn" and health["issues"][0] == {
+        "code": "frame_loss",
+        "severity": "warn",
+        "count": 40,
+    }
 
     stale = {**report, "config_version": version - 1, "state": "OFFLINE"}
     await api.post("/internal/v1/cameras/status", json={"reports": [stale]}, headers=service_token)

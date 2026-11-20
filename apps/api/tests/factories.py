@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BiometricConsent,
+    Branch,
     Camera,
     Department,
     Employee,
@@ -24,6 +25,13 @@ FAKE_ARGON2 = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+async def branch(s: AsyncSession, **kw: object) -> Branch:
+    b = Branch(name=kw.pop("name", f"Filial {_uid()}"), **kw)
+    s.add(b)
+    await s.flush()
+    return b
 
 
 async def department(s: AsyncSession, **kw: object) -> Department:
@@ -52,6 +60,7 @@ async def employee(s: AsyncSession, dept: Department | None = None, **kw: object
         last_name=kw.pop("last_name", "Testov"),
         first_name=kw.pop("first_name", "Test"),
         department_id=dept.id,
+        branch_id=kw.pop("branch_id", dept.branch_id),
         hire_date=kw.pop("hire_date", date(2025, 1, 15)),
         **kw,
     )

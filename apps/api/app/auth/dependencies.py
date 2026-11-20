@@ -9,6 +9,11 @@
 Per request: verify JWT, load the session and user from the DB, and reject when the session is
 revoked or expired or the user is deactivated. The role used for authorization comes from the
 database, never from the token, so role changes apply immediately.
+
+Branch scope (Phase 21): a branch user sees only `user.branch_id`. A user with
+BRANCHES_MANAGE sees every branch, or one branch chosen with the `X-Branch-Id` header (the
+branch switcher in the web app). Endpoints filter with `ctx.scope(Model.branch_id)` and create
+rows in `ctx.write_branch`.
 """
 
 from __future__ import annotations
@@ -17,17 +22,18 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select, true
 
 from app.api.deps import DbSession
-from app.api.errors import forbidden, unauthorized
+from app.api.errors import forbidden, unauthorized, validation_error
 from app.auth.permissions import Permission, permissions_for
 from app.auth.tokens import TokenError, decode_access_token
-from app.models import AuthSession, User
+from app.models import AuthSession, Branch, User
+from app.models.organization import MAIN_BRANCH_ID
 
 _bearer = HTTPBearer(auto_error=False, description="Access token from POST /api/v1/auth/login")
 _TOUCH_INTERVAL = timedelta(minutes=5)
@@ -38,6 +44,24 @@ class AuthContext:
     user: User
     session_id: uuid.UUID
     permissions: frozenset[Permission]
+    # None = every branch (only with BRANCHES_MANAGE and no branch selected).
+    branch_id: uuid.UUID | None = None
+
+    @property
+    def all_branches(self) -> bool:
+        return Permission.BRANCHES_MANAGE in self.permissions
+
+    @property
+    def write_branch(self) -> uuid.UUID:
+        """Branch new rows are created in: the selected/own branch, else the main branch."""
+        return self.branch_id or MAIN_BRANCH_ID
+
+    def scope(self, column: Any) -> ColumnElement[bool]:
+        """WHERE clause limiting a query to the visible branch(es)."""
+        return true() if self.branch_id is None else column == self.branch_id
+
+    def sees(self, branch_id: uuid.UUID | None) -> bool:
+        return self.branch_id is None or branch_id == self.branch_id
 
     @property
     def user_id(self) -> uuid.UUID:
@@ -76,9 +100,29 @@ async def get_current_user(
     if sess.last_used_at is None or now - sess.last_used_at > _TOUCH_INTERVAL:
         sess.last_used_at = now  # throttled write
 
-    ctx = AuthContext(user=user, session_id=sess.id, permissions=permissions_for(user.role))
+    perms = permissions_for(user.role)
+    if Permission.BRANCHES_MANAGE in perms:
+        branch = await _selected_branch(db, request.headers.get("x-branch-id"))
+    else:
+        branch = user.branch_id
+        if not await db.scalar(select(Branch.is_active).where(Branch.id == branch)):
+            raise unauthorized("BRANCH_INACTIVE", "This branch is closed.")
+    ctx = AuthContext(user=user, session_id=sess.id, permissions=perms, branch_id=branch)
     request.state.auth = ctx
     return ctx
+
+
+async def _selected_branch(db: DbSession, raw: str | None) -> uuid.UUID | None:
+    """The branch chosen in the header (super administrator), or None for all branches."""
+    if not raw or raw.strip().lower() in {"all", "*"}:
+        return None
+    try:
+        bid = uuid.UUID(raw.strip())
+    except ValueError:
+        raise validation_error("X-Branch-Id", "invalid", "Not a branch id.") from None
+    if await db.get(Branch, bid) is None:
+        raise validation_error("X-Branch-Id", "not_found", "Branch not found.")
+    return bid
 
 
 CurrentUser = Annotated[AuthContext, Depends(get_current_user)]

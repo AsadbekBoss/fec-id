@@ -89,6 +89,10 @@ class _CameraFields(StrictModel):
     recognition_enabled: bool | None = None
     roi: list[Point] | None = None
     settings: CameraSettings | None = None
+    # Departments served by this camera (empty list = all employees)
+    department_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+    # Branch whose employees this camera records (default: the selected / main branch).
+    branch_id: uuid.UUID | None = None
 
     @field_validator("roi")
     @classmethod
@@ -171,6 +175,7 @@ class CameraOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    branch_id: uuid.UUID
     name: str
     location: str | None
     provider: CameraProvider
@@ -196,6 +201,7 @@ class CameraOut(BaseModel):
     quality_report: dict[str, Any] | None
     roi: list[Any] | None
     settings: dict[str, Any]
+    department_ids: list[uuid.UUID] = []
     config_version: int
     created_at: datetime
     updated_at: datetime
@@ -219,6 +225,20 @@ class QualityTestRequest(StrictModel):
 # --- internal (camera service) --------------------------------------------------------------
 
 
+class HealthIssue(BaseModel):
+    """One finding of the camera service health check (extra fields carry the numbers)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    code: str = Field(max_length=32)
+    severity: Literal["bad", "warn", "tip"]
+
+
+class CameraHealth(StrictModel):
+    verdict: Literal["good", "warn", "bad"]
+    issues: list[HealthIssue] = Field(default_factory=list, max_length=20)
+
+
 class StatusReport(StrictModel):
     camera_id: uuid.UUID
     config_version: int = Field(ge=1)
@@ -233,6 +253,12 @@ class StatusReport(StrictModel):
     width: int | None = None
     height: int | None = None
     uptime_seconds: float | None = None
+    # automatic health (camera service): codec, per-camera CPU, recent losses, verdict + advice
+    codec: str | None = Field(default=None, max_length=16)
+    cpu_percent: float | None = None
+    failures_5m: int | None = None
+    reconnects_1h: int | None = None
+    health: CameraHealth | None = None
 
 
 class StatusBatch(StrictModel):

@@ -34,6 +34,29 @@ class CoreClient:
         if reports:
             self._http.post("/internal/v1/cameras/status", json={"reports": reports}).raise_for_status()
 
+    def report(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Confident recognition -> Core API (attendance only if its master switch is on)."""
+        r = self._http.post("/internal/v1/recognition-events", json=payload)
+        if r.status_code == 422:
+            errors = r.json().get("errors") or [{}]
+            return {"recorded": False, "reason": "rejected:" + str(errors[0].get("code") or "invalid")}
+        r.raise_for_status()
+        return dict(r.json())
+
+    def report_review(self, meta: dict[str, Any], face_jpeg: bytes) -> dict[str, Any]:
+        """Uncertain face (crop only) -> Core API review queue."""
+        import json
+
+        r = self._http.post(
+            "/internal/v1/recognition-reviews",
+            data={"meta": json.dumps(meta)},
+            files={"file": ("face.jpg", face_jpeg, "image/jpeg")},
+        )
+        if r.status_code == 422:
+            return {"stored": False, "reason": "rejected"}
+        r.raise_for_status()
+        return dict(r.json())
+
     def close(self) -> None:
         self._http.close()
 

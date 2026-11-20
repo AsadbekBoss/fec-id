@@ -190,3 +190,41 @@ def test_frames_are_numpy(settings: Settings) -> None:
         lambda decode: (True, np.zeros((2, 2, 3), np.uint8) if decode else None), 0.2, 10
     )
     assert grabs > 0 and failures == 0 and 1 <= len(samples) <= 11 and elapsed >= 0.2
+
+
+# --- live MJPEG preview -----------------------------------------------------------------------
+
+
+def _parts(body: bytes) -> list[bytes]:
+    """Split a multipart/x-mixed-replace body into JPEG payloads using Content-Length."""
+    out, i = [], 0
+    while (h := body.find(b"\r\n\r\n", i)) != -1:
+        head = body[i:h].decode()
+        n = int(head.split("Content-Length: ")[1].split("\r\n")[0])
+        out.append(body[h + 4 : h + 4 + n])
+        i = h + 4 + n + 2
+    return out
+
+
+def test_stream_sends_live_jpeg_frames(settings: Settings) -> None:
+    sup = Supervisor(settings)
+    spec = test_spec("cam-live")
+    sup.apply([spec])
+    try:
+        assert wait_until(lambda: sup.statuses()[0]["state"] == "ONLINE")
+        with TestClient(create_app(settings, supervisor=sup)) as c:
+            body = {"source": spec.model_dump(mode="json"), "fps": 10, "max_side": 320, "seconds": 1}
+            r = c.post("/internal/v1/stream", json=body, headers=AUTH)
+            assert r.status_code == 200
+            assert r.headers["content-type"] == "multipart/x-mixed-replace; boundary=frame"
+            assert r.headers["cache-control"] == "no-store"
+            frames = _parts(r.content)
+            assert 3 <= len(frames) <= 12  # ~10 fps for 1 s
+            assert all(f[:2] == b"\xff\xd8" and f[-2:] == b"\xff\xd9" for f in frames)
+            # a camera that is not monitored has no live stream
+            other = {"source": test_spec("cam-x").model_dump(mode="json"), "seconds": 1}
+            nl = c.post("/internal/v1/stream", json=other, headers=AUTH)
+            assert nl.status_code == 409 and nl.json()["error_code"] == "NOT_LIVE"
+            assert c.post("/internal/v1/stream", json=body).status_code == 401
+    finally:
+        sup.stop_all()

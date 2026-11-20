@@ -67,6 +67,10 @@ class Operations:
         self.analyzer = analyzer
         self._slots = threading.BoundedSemaphore(settings.max_concurrent_operations)
 
+    def live_worker(self, spec: SourceSpec) -> CameraWorker | None:
+        """The running worker for this exact configuration, if it is delivering frames."""
+        return self._live_worker(spec)
+
     def _live_worker(self, spec: SourceSpec) -> CameraWorker | None:
         w = self.sup.get(spec.camera_id)
         if w and w.spec.config_version == spec.config_version and w.state in ("ONLINE", "DEGRADED"):

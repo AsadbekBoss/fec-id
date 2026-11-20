@@ -19,6 +19,12 @@ ignore = []
 "tests/**" = ["S101", "S311", "RUF001", "S105", "S106", "S608", "ASYNC240"]
 # Uzbek apostrophe variants are the subject of these files
 "app/core/text.py" = ["RUF001", "RUF002", "RUF003"]
+# Uzbek report texts
+"app/services/reports.py" = ["RUF001", "RUF002", "RUF003"]
+"app/api/v1/system.py" = ["RUF001"]
+"app/services/notifications.py" = ["RUF001"]
+"app/services/director.py" = ["RUF001"]
+"app/api/v1/notifications.py" = ["RUF001"]
 "app/schemas/employees.py" = ["RUF001"]
 "migrations/**" = ["E501"]  # long SQL / generated lines
 
@@ -32,3 +38,8 @@ exclude = ["migrations/"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[[tool.mypy.overrides]]
+# report rendering libraries ship without type information
+module = ["reportlab", "reportlab.*", "openpyxl", "openpyxl.*"]
+ignore_missing_imports = true

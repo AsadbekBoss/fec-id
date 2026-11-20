@@ -91,6 +91,8 @@ Planned for later phases: `DUPLICATE_FACE`, `CONSENT_REQUIRED`, `SCHEDULE_OVERLA
 | `attendance:read` | ✔ | ✔ | ✔ |
 | `attendance:write` | ✔ | ✔ | — |
 | `reports:read` | ✔ | ✔ | ✔ |
+| `notifications:read` / `notifications:write` | ✔ | ✔ | — |
+| `branches:manage` (every branch) | ✔ | — | — |
 
 Every non-public endpoint declares a permission through `require(Permission.X)`. A test fails if any `/api/v1` route lacks authentication. **The role is read from the database on every request**, never from the token, so role changes and deactivation take effect immediately.
 
@@ -202,6 +204,20 @@ Response `200` (headers: `Cache-Control: no-store`, `Set-Cookie: attendance_refr
 `UserAdmin` = `user` fields above plus `failed_login_count`, `locked_until`, `password_changed_at`, `updated_at`. Password hashes are never returned. All mutations write audit records (`USER_CREATED`, `USER_UPDATED` with a field diff, `USER_PASSWORD_RESET`, `USER_UNLOCKED`, `USER_SESSIONS_REVOKED`).
 
 **First SUPER_ADMIN**: there is no public sign-up. Create it from the server console with `npm run user:create -- --username <name> --role SUPER_ADMIN`. The password is prompted, never passed as an argument.
+
+### 2.2b Branches ✅ Implemented (Phase 21)
+
+Every department, work schedule, employee, user and camera belongs to one branch. Scope: a branch user sees only `user.branch_id`; a user with `branches:manage` (SUPER_ADMIN) sees every branch, or one branch sent as header `X-Branch-Id: <uuid>` (`all` / absent = every branch; unknown id → 422). Rows of another branch answer **404**. New rows go to the selected branch (else the main branch); an employee goes to its department's branch. References in bodies must be in the same branch (422 `not_found`).
+
+| Method | Path | Permission | Success | Errors | Description |
+|--------|------|------------|---------|--------|-------------|
+| GET | `/branches` | any signed-in user | 200 | 401 | All branches (manager) or the own one → `[{id, name, location, is_active, is_main, employee_count, user_count, camera_count}]` |
+| POST | `/branches` | `branches:manage` | 201 | 409 `BRANCH_EXISTS`, 422 | `{name, location?}` |
+| PATCH | `/branches/{id}` | `branches:manage` | 200 | 404, 409 `MAIN_BRANCH` / `BRANCH_EXISTS` | `{name?, location?, is_active?}`. Closing: its users get 401 `BRANCH_INACTIVE` and cannot sign in; data is kept |
+| DELETE | `/branches/{id}` | `branches:manage` | 204 | 404, 409 `MAIN_BRANCH` / `BRANCH_NOT_EMPTY` | Only a branch with no rows at all |
+| GET | `/branches/overview?date=` | `branches:manage` | 200 | 403 | `{date, branches: [{branch, totals}], totals}`; totals as in `/attendance/board` |
+
+`/auth/me` adds `branch {id, name}` and `all_branches`. Users, employees, departments, schedules and cameras carry `branch_id`; `POST/PATCH /users` and `/cameras` accept `branch_id`. Ignore reason `OTHER_BRANCH`: a camera recognised an employee of another branch. Audit: `BRANCH_CREATED`, `BRANCH_UPDATED`, `BRANCH_DELETED`.
 
 ### 2.2a Settings ✅ Implemented (read-only)
 
@@ -345,6 +361,27 @@ Planned (not implemented): face enrollment endpoints (`/employees/{id}/enrollmen
 
 `EMPLOYEE_CREATED`, `EMPLOYEE_UPDATED` (field diff), `EMPLOYEE_DEACTIVATED` / `EMPLOYEE_ACTIVATED` (with reason), `EMPLOYEE_PHOTO_UPDATED` / `EMPLOYEE_PHOTO_DELETED`, `DEPARTMENT_CREATED` / `_UPDATED` / `_DELETED`, `BIOMETRIC_CONSENT_RECORDED`, `BIOMETRIC_CONSENT_DOCUMENTED`, `BIOMETRIC_CONSENT_DOCUMENT_VIEWED`, `BIOMETRIC_CONSENT_REVOKED` (with `templates_deleted` count).
 
+### 2.7a Review queue ✅ Implemented (Phase 15)
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/recognition/reviews?status=PENDING\|ASSIGNED\|DISMISSED\|ALL&camera_id&page&page_size≤100` | `biometrics:read` | `{id, event_time, camera_id, camera_name, camera_direction, decision, similarity, has_snapshot, review_status, reviewed_at, reviewed_by_user_id, employee?, punch_event_id?}` |
+| GET | `/recognition/reviews/{id}/snapshot` | `biometrics:read` | JPEG face crop, `no-store`, audited; 410 `SNAPSHOT_DELETED` |
+| POST | `/recognition/reviews/{id}/assign` `{employee_id, direction?, note?}` | + `attendance:write` | MANUAL punch via corrections; 409 `REVIEW_CLOSED`; 422 sequence errors / direction required |
+| POST | `/recognition/reviews/{id}/dismiss` `{reason?}` | + `attendance:write` | 409 `REVIEW_CLOSED` |
+
+Internal (camera token): `POST /internal/v1/recognition-reviews` multipart `meta` (JSON: event_uid, camera_id, event_time, decision AMBIGUOUS|UNKNOWN, model_id, similarity?, second_similarity?, quality_score?) + `file` (JPEG crop ≤ 512 KB) → `{stored, review_id?}` or `{stored:false, reason}`.
+
+### 2.10a Reports ✅ Implemented (Phase 14)
+
+Permission `reports:read`. `format` = `json` (default, `{kind, title, subtitle, columns:[{key,label,align}], rows, footer}`) | `xlsx` | `pdf` (attachment, `no-store`, audited `REPORT_EXPORTED`).
+
+| Method | Path | Query |
+|---|---|---|
+| GET | `/reports/timesheet` | `month=YYYY-MM`, `department_id?` (subtree) |
+| GET | `/reports/lateness` | `date_from`, `date_to` (≤ 92 days), `department_id?` |
+| GET | `/reports/absence` | `date_from`, `date_to` (≤ 92 days), `department_id?` |
+
 ### 2.5a Face enrolment ✅ Implemented (Phase 11)
 
 Replaces the planned `/enrollments` rows. Permission `biometrics:write` (list: `biometrics:read`).
@@ -353,12 +390,18 @@ Replaces the planned `/enrollments` rows. Permission `biometrics:write` (list: `
 |---|---|---|---|
 | GET | `/employees/{id}/face-templates` | 200 `[{id, model_id, dim, quality_score, created_at, created_by_user_id}]` (never vectors) | 404 |
 | POST | `/employees/{id}/face-templates` (multipart `file`, JPEG/PNG ≤ 8 MB) | 201 template | 404, 409 `CONSENT_REQUIRED` / `NOT_FACE_METHOD` / `EMPLOYEE_TERMINATED` / `TEMPLATE_LIMIT` / `FACE_MATCHES_OTHER_EMPLOYEE`, 413, 422 `INVALID_FILE` / `FACE_NOT_ACCEPTED` (`errors[0].code` = no_face, multiple_faces, low_quality; `message` = quality reasons), 503 `RECOGNITION_SERVICE_UNAVAILABLE` |
-| POST | `/employees/{id}/face-templates/from-camera` `{camera_id}` | 201 | as above + 502/503 camera errors |
+| POST | `/employees/{id}/face-templates/from-camera` `{camera_id, pose?: frontal|turned, yaw_sign?: -1|1}` | 201 | as above + 502/503 camera errors. With `pose`, the enrolled frame must match (frontal |yaw| ≤ 10°, turned |yaw| ≥ 12°, side = sign of yaw) else 422 `POSE_MISMATCH` (`errors[0].code`: not_frontal, not_turned, wrong_side, pose_unknown). Response adds `yaw_deg` (not stored). |
+| GET | `/employees/{id}/face-templates/scan-stream?camera_id=` | 200 | `multipart/x-mixed-replace; boundary=frame` (JPEG parts with Content-Length), ~15 fps, 640 px, ends after 120 s; `biometrics:write`; 409 `CAMERA_NOT_LIVE` if the camera is not monitored, 429 `PREVIEW_BUSY`; nothing stored; audited like scan-frame |
+| POST | `/employees/{id}/face-templates/scan-frame` `{camera_id, preview?: bool = true}` | 200 | Guided enrolment preview (`biometrics:write`): `{preview: data:image/jpeg;base64 (≤480 px, re-encoded), faces, face: {box [x,y,w,h] fractions, yaw_deg, roll_deg, passed, reasons, face_width_px} | null}` for the largest face. No identification, no embeddings, nothing stored; audited `ENROLMENT_PREVIEW_VIEWED` once per user+camera per 5 min |
 | DELETE | `/employees/{id}/face-templates/{template_id}` | 204 | 404 |
 
 All audited (`BIOMETRIC_TEMPLATE_ENROLLED` / `_DELETED`, with consent id and source, never vectors). The image is discarded after extraction.
 
 `GET /recognition/live?since=&camera_id=` (`biometrics:read`): recent in-memory observations `{observations:[{seq, camera_id, decision, employee:{id, employee_code, full_name}|null, score, face_width_px, quality_reasons, count, first_seen, last_seen}], next, cameras:[{camera_id, name, recognition, last_error, frames_sent, latency_ms}]}`. `employee` is set **only** for MATCHED. Not stored; no attendance effect.
+
+Settings: `PATCH /api/v1/settings/{key}` `{value}` (`settings:write`), writable keys only: `recognition.attendance_enabled` (bool), `attendance.debounce_seconds` (10–3600), `attendance.min_presence_minutes` (0–720); 404 for other keys, 422 invalid value; audited `SETTING_UPDATED`.
+
+Recognition → attendance (camera token): `POST /internal/v1/recognition-events` `{event_uid, camera_id, employee_id, event_time, decision: "MATCHED", model_id, similarity?, second_similarity?, quality_score?}` → `{recorded:false, reason: attendance_disabled|camera_not_enabled}` or `{recorded:true, created, counted, direction, ignore_reason, work_date}`; 422 `EVENT_REJECTED` (clock/unknown employee).
 
 Internal: `GET /internal/v1/gallery?model_id=` (Bearer `RECOGNITION_GALLERY_TOKEN`) → encrypted templates of eligible employees. Recognition service: `POST /internal/v1/templates/extract`. Camera service: `GET /internal/v1/observations`.
 
@@ -567,6 +610,25 @@ Assign a schedule to an employee (`PATCH /employees/{id}` `work_schedule_id`) or
 | GET | `/reports/exports/{id}/download` | owner | File (24 h), audited |
 | POST | `/employees/{id}/subject-access-export` | `biometrics:enroll` | DSAR ZIP → export job |
 
+### 2.10a Telegram notifications (Phase 17)
+
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| GET | `/notifications/telegram` | `notifications:read` | `{configured, bot_username, bot_error, enabled, daily_summary_time, review_interval_minutes, camera_offline_minutes, worker_running, worker_last_run, worker_error, recipients[{id, title, username, is_active, subscriptions[], last_error, created_at}], recent[{kind, created_at, recipients, delivered, summary}]}`. Never returns the token |
+| POST | `/notifications/telegram/link` `{title}` | `notifications:write` | `{code, link: https://t.me/<bot>?start=<code>, bot_username, expires_at}`; one-time, 15 min; 409 `TELEGRAM_NOT_CONFIGURED` without a token |
+| PATCH | `/notifications/telegram/recipients/{id}` `{title?, is_active?, subscriptions?}` | `notifications:write` | subscriptions ⊆ daily, late, reviews, system; audited |
+| DELETE | `/notifications/telegram/recipients/{id}` | `notifications:write` | 204, audited |
+| POST | `/notifications/telegram/test` `{recipient_id?}` | `notifications:write` | `{recipients, delivered, errors[]}` |
+| GET | `/notifications/telegram/daily-preview` | `notifications:read` | `{text}` today's summary (null on a day off), not sent |
+| GET | `/notifications/telegram/director-preview?period=day\|week\|month` | `branches:manage` | `{text}` the director's report (every branch ranked, missing people), not sent. Kind `director` can be subscribed by centre chats only (branch chat → 422 `centre_only`) |
+
+| GET | `/employees/{id}/telegram` | `employees:read` | `{configured, enabled, bot_username, linked, username, is_active, subscriptions (self_punch|self_late)[], last_error, linked_at}` |
+| POST | `/employees/{id}/telegram/link` | `employees:write` | one-time link for the employee (same shape as `/notifications/telegram/link`) |
+| PATCH | `/employees/{id}/telegram` `{is_active?, subscriptions?: (self_punch|self_late)[]}` | `employees:write` | admin kinds are rejected (422) |
+| DELETE | `/employees/{id}/telegram` | `employees:write` | 204; unlinks (the chat stays if it also receives admin messages) |
+
+Settings (PATCH `/settings/{key}`): `notify.telegram_enabled` (bool, default false), `notify.daily_summary_time` ("HH:MM"), `notify.review_interval_minutes` (5–1440), `notify.camera_offline_minutes` (1–1440).
+
 ### 2.11 Audit, settings, system
 
 | Method | Path | Permission | Description |
@@ -574,7 +636,7 @@ Assign a schedule to an employee (`PATCH /employees/{id}` `work_schedule_id`) or
 | GET | `/audit-logs` | `audit:read` | `?actor_user_id=&action=&entity_type=&entity_id=&from=&to=` |
 | GET | `/settings` | `settings:read` | All typed settings |
 | PATCH | `/settings` | `settings:write` | Partial update, validated per key, audited |
-| GET | `/system/health` | `system:read` | Status of API, DB, Valkey, recognition, go2rtc, disk, last backup |
+| GET | `/system/status` | `branches:manage` | **Implemented (Phase 16).** `{status: ok|warning|error, checked_at, version, environment, api_uptime_seconds, checks[{name, title, status: ok|warning|error|not_configured, detail, latency_ms, info}], supervisor{running, mode, started_at, updated_at, services[{name,title,port,state,started_at,restarts,last_exit_code,last_exit_at,last_error,log}]}|null}`. Checks: api, database (migration), recognition (`/ready`: templates, employees), camera (`/ready`: cameras), backup (newest `.attbak`, warning after 36 h), disk (warning under 5 GB). `supervisor` comes from `logs/supervisor.json` written by `tools/run.mjs` (stale after 30 s → `running: false`). No secrets, URLs or file contents. Replaces the planned `/system/health` (no Valkey or go2rtc in this deployment). |
 | GET | `/system/version` | public | `{api, web, recognition, model_ids[]}` |
 
 Typed settings keys (v1):

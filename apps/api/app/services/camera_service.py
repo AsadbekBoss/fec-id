@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Annotated, Any, Protocol
 
 import httpx
@@ -16,6 +17,7 @@ from fastapi import Depends
 
 from app.api.errors import AppError
 from app.core.config import get_settings
+from app.core.http import tls_context
 from app.models import Camera
 from app.models.enums import CameraProvider
 
@@ -68,6 +70,9 @@ class CameraService(Protocol):
     async def snapshot(self, spec: dict[str, Any]) -> bytes: ...
     async def quality_test(self, spec: dict[str, Any], duration_seconds: int) -> dict[str, Any]: ...
     async def observations(self, since: int, camera_id: str | None) -> dict[str, Any]: ...
+    async def stream(
+        self, spec: dict[str, Any], fps: float, max_side: int, seconds: int
+    ) -> tuple[str, AsyncIterator[bytes]]: ...
 
 
 class CameraServiceClient:
@@ -78,7 +83,9 @@ class CameraServiceClient:
         self, path: str, body: dict[str, Any], extra_seconds: float = 0
     ) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout + extra_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout + extra_seconds, verify=tls_context()
+            ) as client:
                 r = await client.post(
                     self._base + path, json=body, headers={"Authorization": f"Bearer {self._token}"}
                 )
@@ -115,12 +122,61 @@ class CameraServiceClient:
         )
         return dict(r.json())
 
+    async def stream(
+        self, spec: dict[str, Any], fps: float, max_side: int, seconds: int
+    ) -> tuple[str, AsyncIterator[bytes]]:
+        """Live MJPEG preview of a monitored camera: (content type, body chunks).
+
+        Errors are raised before the first byte (so the browser gets a normal problem
+        response); the connection is closed when the consumer stops iterating."""
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(self._timeout, read=15), verify=tls_context()
+        )
+        body = {"source": spec, "fps": fps, "max_side": max_side, "seconds": seconds}
+        try:
+            req = client.build_request(
+                "POST",
+                self._base + "/internal/v1/stream",
+                json=body,
+                headers={"Authorization": f"Bearer {self._token}"},
+            )
+            r = await client.send(req, stream=True)
+        except httpx.HTTPError:
+            await client.aclose()
+            raise unavailable("The camera service did not respond.") from None
+        if r.status_code != 200:
+            await r.aread()
+            await r.aclose()
+            await client.aclose()
+            if r.status_code == 409:
+                raise AppError(
+                    409,
+                    "CAMERA_NOT_LIVE",
+                    "Camera not monitored",
+                    "Live preview needs the camera to be monitored (turn monitoring on).",
+                )
+            if r.status_code == 429:
+                raise AppError(429, "PREVIEW_BUSY", "Too many previews", "Close another preview.")
+            raise unavailable(f"The camera service failed (HTTP {r.status_code}).")
+
+        async def chunks() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in r.aiter_raw():
+                    yield chunk
+            except httpx.HTTPError:
+                return  # camera service went away: end the stream
+            finally:
+                await r.aclose()
+                await client.aclose()
+
+        return r.headers.get("content-type", "multipart/x-mixed-replace"), chunks()
+
     async def observations(self, since: int, camera_id: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {"since": since}
         if camera_id:
             params["camera_id"] = camera_id
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, verify=tls_context()) as client:
                 r = await client.get(
                     self._base + "/internal/v1/observations",
                     params=params,

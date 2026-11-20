@@ -2,11 +2,10 @@
 
 import { Camera as CameraIcon, ScanFace, Trash2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
-import { ApiError, api } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { errorMessage } from "@/lib/errors";
+import { enrolmentError } from "@/lib/face-scan";
 import { formatDate, formatTime } from "@/lib/format";
-import { QUALITY_REASON } from "@/lib/labels";
 import type { Camera, Employee, FaceTemplate, Page } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { Alert } from "@/components/ui/alert";
@@ -16,26 +15,9 @@ import { ConfirmDialog } from "@/components/ui/confirm";
 import { Field, Select } from "@/components/ui/form";
 import { Skeleton } from "@/components/ui/spinner";
 import { useToast } from "@/components/ui/toast";
+import { FaceScanModal } from "@/components/face-scan";
 
-const FACE_REASON: Record<string, string> = {
-  no_face: "Rasmda yuz topilmadi.",
-  multiple_faces: "Rasmda bir nechta yuz bor. Faqat shu xodim boʻlsin.",
-  low_quality: "Yuz sifati yetarli emas.",
-  invalid_image: "Rasmni oʻqib boʻlmadi.",
-};
-
-/** Uzbek message for an enrolment error, including the quality reasons from the service. */
-export function enrolmentError(err: unknown): string {
-  if (err instanceof ApiError && err.code === "FACE_NOT_ACCEPTED") {
-    const e = err.errors[0];
-    const reasons = (e?.message ?? "")
-      .split(",")
-      .filter((r) => r && r !== e?.code)
-      .map((r) => QUALITY_REASON[r] ?? r);
-    return [FACE_REASON[e?.code ?? ""] ?? "Yuz qabul qilinmadi.", reasons.join(", ")].filter(Boolean).join(" ");
-  }
-  return errorMessage(err);
-}
+export { enrolmentError } from "@/lib/face-scan";
 
 export function FaceTemplatesCard({ employee, onChanged }: { employee: Employee; onChanged: () => void }) {
   const { can } = useAuth();
@@ -44,7 +26,8 @@ export function FaceTemplatesCard({ employee, onChanged }: { employee: Employee;
   const templates = useApiQuery<FaceTemplate[]>(`/employees/${employee.id}/face-templates`);
   const cameras = useApiQuery<Page<Camera>>(writable && can("cameras:read") ? "/cameras?page_size=200" : null);
   const [cameraId, setCameraId] = useState("");
-  const [busy, setBusy] = useState<"upload" | "camera" | null>(null);
+  const [busy, setBusy] = useState<"upload" | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<FaceTemplate | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -71,19 +54,7 @@ export function FaceTemplatesCard({ employee, onChanged }: { employee: Employee;
     }
   };
 
-  const fromCamera = async () => {
-    if (!cameraId) return;
-    setBusy("camera");
-    setError(null);
-    try {
-      await api.request(`/employees/${employee.id}/face-templates/from-camera`, { method: "POST", json: { camera_id: cameraId } });
-      done();
-    } catch (err) {
-      setError(enrolmentError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
+  const scanCamera = cameras.data?.items.find((c) => c.id === cameraId);
 
   return (
     <Card>
@@ -151,22 +122,41 @@ export function FaceTemplatesCard({ employee, onChanged }: { employee: Employee;
                   <Field label="Kamera" className="w-56">
                     <Select value={cameraId} onChange={(e) => setCameraId(e.target.value)}>
                       <option value="">Tanlang…</option>
-                      {cameras.data.items.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      {cameras.data.items.map((c) => (
+                        <option key={c.id} value={c.id} disabled={!c.is_enabled}>
+                          {c.name}{c.is_enabled ? "" : " (monitoring oʻchiq)"}
+                        </option>
+                      ))}
                     </Select>
                   </Field>
                   <Button
                     icon={<CameraIcon className="h-4 w-4" />}
-                    loading={busy === "camera"}
                     disabled={busy !== null || !cameraId}
-                    onClick={() => void fromCamera()}
+                    onClick={() => setScanning(true)}
                   >
-                    Kameradan olish
+                    Kamera bilan skanerlash
                   </Button>
                 </>
               ) : null}
             </div>
-            {busy === "camera" ? <p className="text-xs text-muted">Xodim kameraga toʻgʻri qarab tursin…</p> : null}
+            <p className="text-xs text-muted">
+              Skanerlashda oyna ochiladi: toʻgʻriga, chapga, oʻngga qarash soʻraladi va har bir holatda namuna avtomatik olinadi.
+            </p>
           </div>
+        ) : null}
+        {scanning && scanCamera ? (
+          <FaceScanModal
+            employeeId={employee.id}
+            employeeName={employee.full_name}
+            cameraId={scanCamera.id}
+            cameraName={scanCamera.name}
+            existing={items}
+            onClose={() => setScanning(false)}
+            onChanged={() => {
+              templates.reload();
+              onChanged();
+            }}
+          />
         ) : null}
       </CardBody>
       <ConfirmDialog

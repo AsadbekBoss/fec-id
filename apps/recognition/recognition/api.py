@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -27,6 +28,7 @@ from recognition.crypto import Keyring
 from recognition.engine import ImageRejected, ImageResult, RecognitionEngine, decode_image
 from recognition.metrics import configure_logging
 from recognition.types import Decision
+from recognition.visitors import VisitorCache
 
 
 def _require_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
@@ -76,6 +78,9 @@ def create_app(settings: Settings | None = None, engine: RecognitionEngine | Non
             keyring = Keyring.parse(s.data_encryption_keys.get_secret_value(), s.data_encryption_active_key_id)
             eng.gallery.load(gallery_store.decrypt_templates(gallery_store.load_entries(s.gallery_path), keyring))
         app.state.engine = eng
+        # same-person threshold of the matcher, a little stricter: merging two strangers would
+        # hide a card; splitting one only adds a card
+        app.state.visitors = VisitorCache(max(eng.policy.threshold, 0.40))
         sync: GallerySync | None = None
         if s.core_api_url and s.core_api_token:
             keyring = Keyring.parse(s.data_encryption_keys.get_secret_value(), s.data_encryption_active_key_id)
@@ -157,6 +162,9 @@ def create_app(settings: Settings | None = None, engine: RecognitionEngine | Non
             "embedding_b64": base64.b64encode(vec.astype("<f4").tobytes()).decode(),
             "quality_score": round(float(face.detection.score), 4),
             "face_width_px": round(q.face_width_px, 1),
+            # Head pose (landmark heuristic) so guided enrolment can check "look straight / turn".
+            "yaw_deg": None if q.yaw_deg is None else round(q.yaw_deg, 1),
+            "roll_deg": None if q.roll_deg is None else round(q.roll_deg, 1),
             "nearest": None if near is None else {
                 "employee_id": near[0], "score": round(near[1], 4), "same_person_likely": near[1] >= threshold,
             },
@@ -167,6 +175,14 @@ def create_app(settings: Settings | None = None, engine: RecognitionEngine | Non
         img = await read_image(file)
         eng: RecognitionEngine = request.app.state.engine
         res = await anyio.to_thread.run_sync(eng.process, img)
-        return {"faces": _face_json(res), "image_size": res.image_size, "timings_ms": res.timings_ms}
+        faces = _face_json(res)
+        visitors: VisitorCache = request.app.state.visitors
+        now = time.monotonic()
+        for f, vec in zip(faces, res.embeddings, strict=False):
+            # anonymous id for unidentified faces, so the review queue gets one card per person
+            if f["decision"] in ("UNKNOWN", "AMBIGUOUS") and vec is not None:
+                f["visitor_id"] = visitors.assign(vec, now)
+        return {"faces": faces, "image_size": res.image_size, "timings_ms": res.timings_ms,
+                "model_id": eng.embedder.model_id}
 
     return app

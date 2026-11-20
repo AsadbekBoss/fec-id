@@ -10,6 +10,7 @@ export type UserAdmin = {
   username: string;
   email: string | null;
   role: Role;
+  branch_id: string;
   is_active: boolean;
   locale: string;
   last_login_at: string | null;
@@ -24,8 +25,27 @@ export type UserAdmin = {
 export type Setting = { key: string; value: unknown; description: string | null; updated_at: string };
 
 // --- departments (§2.3) ---
+// --- branches (Phase 21) ---
+export type Branch = {
+  id: string;
+  name: string;
+  location: string | null;
+  is_active: boolean;
+  is_main: boolean;
+  employee_count: number;
+  user_count: number;
+  camera_count: number;
+};
+
+export type BranchOverview = {
+  date: string;
+  branches: { branch: Branch; totals: Record<string, number> }[];
+  totals: Record<string, number>;
+};
+
 export type Department = {
   id: string;
+  branch_id: string;
   name: string;
   code: string | null;
   parent_id: string | null;
@@ -49,6 +69,7 @@ export type BiometricStatus =
 
 export type Employee = {
   id: string;
+  branch_id: string;
   employee_code: string;
   last_name: string;
   first_name: string;
@@ -96,6 +117,7 @@ export type Consent = {
 // --- work schedules (§2.9) ---
 export type WorkSchedule = {
   id: string;
+  branch_id: string;
   name: string;
   timezone: string;
   start_time: string;
@@ -117,7 +139,14 @@ export type WorkSchedule = {
 export type DayStatus = "PRESENT" | "LATE" | "INCOMPLETE" | "ABSENT" | "WEEKEND" | "NOT_SCHEDULED" | "PENDING";
 
 export type Day = {
-  employee: { id: string; employee_code: string; full_name: string; department_id: string };
+  employee: {
+    id: string;
+    employee_code: string;
+    full_name: string;
+    department_id: string;
+    has_photo: boolean;
+    photo_updated_at: string | null;
+  };
   work_date: string;
   status: DayStatus;
   in_progress: boolean;
@@ -175,6 +204,8 @@ export type CameraStatus = "DRAFT" | "ACTIVE" | "DEGRADED" | "OFFLINE" | "DISABL
 export type CameraQualityStatus = "UNTESTED" | "PASSED" | "FAILED" | "INCONCLUSIVE";
 export type TestSimulate = "none" | "flaky" | "disconnect" | "offline" | "freeze";
 
+import type { CameraHealth } from "@/lib/camera-health";
+
 export type CameraRuntime = {
   state: "CONNECTING" | "ONLINE" | "DEGRADED" | "OFFLINE" | "STOPPED";
   last_frame_at: string | null;
@@ -187,6 +218,12 @@ export type CameraRuntime = {
   width: number | null;
   height: number | null;
   uptime_seconds: number | null;
+  // automatic health check of the camera service
+  codec?: string | null;
+  cpu_percent?: number | null;
+  failures_5m?: number | null;
+  reconnects_1h?: number | null;
+  health?: CameraHealth | null;
 };
 
 export type QualityReport = {
@@ -229,6 +266,7 @@ export type CameraSettings = {
 
 export type Camera = {
   id: string;
+  branch_id: string;
   name: string;
   location: string | null;
   provider: CameraProvider;
@@ -254,6 +292,8 @@ export type Camera = {
   quality_report: QualityReport | null;
   roi: unknown[] | null;
   settings: CameraSettings;
+  /** Departments this camera counts attendance for (empty = everyone). */
+  department_ids: string[];
   config_version: number;
   created_at: string;
   updated_at: string;
@@ -291,6 +331,8 @@ export type LiveObservation = {
   face_width_px: number | null;
   quality_reasons: string[];
   count: number;
+  /** Outcome of reporting to attendance: IN / OUT / ignore reason / why not sent; null = not reported. */
+  attendance: string | null;
   first_seen: string;
   last_seen: string;
 };
@@ -299,4 +341,21 @@ export type LiveResponse = {
   observations: LiveObservation[];
   next: number;
   cameras: { camera_id: string; name: string; recognition: string; last_error: string | null; frames_sent: number; latency_ms: number | null }[];
+};
+
+// --- review queue (Phase 15) ---
+export type ReviewItem = {
+  id: number;
+  event_time: string;
+  camera_id: string | null;
+  camera_name: string | null;
+  camera_direction: CameraDirection | null;
+  decision: "AMBIGUOUS" | "UNKNOWN";
+  similarity: number | null;
+  has_snapshot: boolean;
+  review_status: "PENDING" | "ASSIGNED" | "DISMISSED";
+  reviewed_at: string | null;
+  reviewed_by_user_id: string | null;
+  employee: { id: string; employee_code: string; full_name: string } | null;
+  punch_event_id: number | null;
 };

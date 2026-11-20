@@ -1,4 +1,4 @@
-"""Departments, work schedules, employees, users."""
+"""Branches, departments, work schedules, employees, users."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     Time,
+    UniqueConstraint,
     func,
     text,
 )
@@ -34,14 +35,48 @@ if TYPE_CHECKING:
     from app.models.biometrics import BiometricConsent, FaceEmbedding
 
 
+# The branch every pre-existing row belongs to ("Markaz"). Created by migration 0011 and used as
+# the column default, so rows created without an explicit branch land there. It cannot be deleted.
+MAIN_BRANCH_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+def branch_fk() -> Mapped[uuid.UUID]:
+    return mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("branches.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+        server_default=text(f"'{MAIN_BRANCH_ID}'::uuid"),
+        default=MAIN_BRANCH_ID,
+    )
+
+
+class Branch(UUIDPrimaryKey, Timestamps, Base):
+    """A filial / district office. Branch users see and manage only their branch's data; the
+    super administrator sees every branch (Phase 21)."""
+
+    __tablename__ = "branches"
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    location: Mapped[str | None] = mapped_column(String(200))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    __table_args__ = (
+        CheckConstraint("length(btrim(name)) > 0", name="name_not_blank"),
+        Index("uq_branches_name", text("lower(name)"), unique=True),
+    )
+
+
 class Department(UUIDPrimaryKey, Timestamps, SoftDelete, Base):
     __tablename__ = "departments"
+
+    branch_id: Mapped[uuid.UUID] = branch_fk()
 
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), index=True
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    code: Mapped[str | None] = mapped_column(String(50), unique=True)
+    code: Mapped[str | None] = mapped_column(String(50))  # unique per branch
     head_employee_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         # employees -> departments and departments -> employees form a cycle: add later.
@@ -65,9 +100,11 @@ class Department(UUIDPrimaryKey, Timestamps, SoftDelete, Base):
     __table_args__ = (
         CheckConstraint("parent_id IS NULL OR parent_id <> id", name="not_own_parent"),
         CheckConstraint("length(btrim(name)) > 0", name="name_not_blank"),
-        # Sibling names unique (case-insensitive) among non-deleted departments.
+        UniqueConstraint("branch_id", "code"),
+        # Sibling names unique (case-insensitive) among non-deleted departments of a branch.
         Index(
             "uq_departments_parent_name_active",
+            "branch_id",
             text("coalesce(parent_id, '00000000-0000-0000-0000-000000000000'::uuid)"),
             text("lower(name)"),
             unique=True,
@@ -82,7 +119,8 @@ class WorkSchedule(UUIDPrimaryKey, Timestamps, Base):
 
     __tablename__ = "work_schedules"
 
-    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    branch_id: Mapped[uuid.UUID] = branch_fk()
+    name: Mapped[str] = mapped_column(String(120), nullable=False)  # unique per branch
     timezone: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default="Asia/Tashkent"
     )
@@ -102,6 +140,7 @@ class WorkSchedule(UUIDPrimaryKey, Timestamps, Base):
     employees: Mapped[list[Employee]] = relationship(back_populates="work_schedule", lazy="raise")
 
     __table_args__ = (
+        UniqueConstraint("branch_id", "name"),
         CheckConstraint("start_time <> end_time", name="start_ne_end"),
         CheckConstraint(
             "cardinality(working_days) BETWEEN 1 AND 7 "
@@ -126,7 +165,8 @@ class Employee(UUIDPrimaryKey, Timestamps, SoftDelete, Base):
 
     __tablename__ = "employees"
 
-    employee_code: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    branch_id: Mapped[uuid.UUID] = branch_fk()
+    employee_code: Mapped[str] = mapped_column(String(50), nullable=False)  # unique per branch
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     middle_name: Mapped[str | None] = mapped_column(String(100))
@@ -179,13 +219,14 @@ class Employee(UUIDPrimaryKey, Timestamps, SoftDelete, Base):
         back_populates="employee", passive_deletes=True, lazy="raise"
     )
     attendance_events: Mapped[list[AttendanceEvent]] = relationship(
-        back_populates="employee", lazy="raise"
+        back_populates="employee", foreign_keys="AttendanceEvent.employee_id", lazy="raise"
     )
     attendance_days: Mapped[list[AttendanceDaily]] = relationship(
         back_populates="employee", lazy="raise"
     )
 
     __table_args__ = (
+        UniqueConstraint("branch_id", "employee_code"),
         CheckConstraint("employee_code ~ '^[A-Za-z0-9_.-]{1,50}$'", name="code_format"),
         # Codes are stored upper-case so "e001" and "E001" cannot both exist.
         CheckConstraint("employee_code = upper(employee_code)", name="code_upper"),
@@ -229,6 +270,9 @@ class Employee(UUIDPrimaryKey, Timestamps, SoftDelete, Base):
 
 class User(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "users"
+
+    # Branch users see only this branch. SUPER_ADMIN ignores it (sees every branch).
+    branch_id: Mapped[uuid.UUID] = branch_fk()
 
     username: Mapped[str] = mapped_column(CITEXT, nullable=False, unique=True)
     email: Mapped[str | None] = mapped_column(CITEXT, unique=True)

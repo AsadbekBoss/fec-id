@@ -15,6 +15,8 @@ from app.core.config import get_settings
 from app.core.crypto import get_keyring
 from app.core.logging import configure_logging
 from app.db.session import dispose_engine
+from app.services import notifications
+from app.services.telegram import telegram_client
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -25,8 +27,18 @@ SECURITY_HEADERS = {
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
-    await dispose_engine()
+    # Telegram notifications run inside the API process when a bot token is configured.
+    tg = telegram_client()
+    if tg is not None and get_settings().app_env != "test":
+        notifications.worker = notifications.NotificationWorker(tg)
+        notifications.worker.start()
+    try:
+        yield
+    finally:
+        if notifications.worker is not None:
+            await notifications.worker.stop()
+            notifications.worker = None
+        await dispose_engine()
 
 
 def create_app() -> FastAPI:
@@ -60,6 +72,7 @@ def create_app() -> FastAPI:
             "Idempotency-Key",
             "X-Request-ID",
             "X-Requested-With",
+            "X-Branch-Id",  # branch switcher (Phase 21)
         ],
     )
 

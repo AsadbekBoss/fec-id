@@ -99,12 +99,25 @@ class AttendanceEvent(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT")
     )
     note: Mapped[str | None] = mapped_column(Text)
+    # Review queue (Phase 15): uncertain camera observations a person decides about.
+    # PENDING -> ASSIGNED (a MANUAL punch was created for review_employee_id) or DISMISSED.
+    review_status: Mapped[str | None] = mapped_column(String(16))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    review_employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employees.id", ondelete="RESTRICT")
+    )
+    review_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("attendance_events.id", ondelete="RESTRICT")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
     employee: Mapped[Employee | None] = relationship(
-        back_populates="attendance_events", lazy="raise"
+        back_populates="attendance_events", foreign_keys=[employee_id], lazy="raise"
     )
     camera: Mapped[Camera | None] = relationship(back_populates="attendance_events", lazy="raise")
     created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_user_id], lazy="raise")
@@ -170,6 +183,21 @@ class AttendanceEvent(Base):
             "(liveness_score IS NULL OR liveness_score BETWEEN 0 AND 1) AND "
             "(quality_score IS NULL OR quality_score BETWEEN 0 AND 1)",
             name="score_range",
+        ),
+        CheckConstraint(
+            "review_status IS NULL OR (review_status IN ('PENDING', 'ASSIGNED', 'DISMISSED') "
+            "AND source = 'CAMERA' AND decision IN ('AMBIGUOUS', 'UNKNOWN'))",
+            name="review_only_uncertain",
+        ),
+        CheckConstraint(
+            "review_status IS DISTINCT FROM 'ASSIGNED' OR "
+            "(review_employee_id IS NOT NULL AND review_event_id IS NOT NULL)",
+            name="review_assigned_complete",
+        ),
+        Index(
+            "ix_attendance_events_review_pending",
+            "event_time",
+            postgresql_where=text("review_status = 'PENDING'"),
         ),
         Index("ix_attendance_events_employee_time", "employee_id", text("event_time DESC")),
         Index("ix_attendance_events_camera_time", "camera_id", text("event_time DESC")),

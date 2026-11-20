@@ -10,7 +10,7 @@ import type { AttendanceEvent, Day, Employee, Page } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { useEmployeeNames } from "@/lib/use-employee-names";
 import { DayDetailModal } from "@/components/attendance/day-detail";
-import { DayStatusBadge, DepartmentSelect, EmployeePicker, type PickedEmployee } from "@/components/entities";
+import { DayStatusBadge, DepartmentSelect, EmployeeAvatar, EmployeePicker, type PickedEmployee } from "@/components/entities";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -127,7 +127,16 @@ function DaysTab({ employee, setEmployee }: EmpProps) {
             empty={<EmptyState title="Maʼlumot topilmadi" />}
             columns={[
               { key: "date", header: "Sana", cell: (d) => formatDate(`${d.work_date}T12:00:00Z`) },
-              { key: "emp", header: "Xodim", cell: (d) => <span className="font-medium">{d.employee.full_name}</span> },
+              {
+                key: "emp",
+                header: "Xodim",
+                cell: (d) => (
+                  <span className="flex items-center gap-2">
+                    <EmployeeAvatar employee={d.employee} className="h-8 w-8" />
+                    <span className="font-medium">{d.employee.full_name}</span>
+                  </span>
+                ),
+              },
               { key: "status", header: "Holat", cell: (d) => <DayStatusBadge status={d.status} inProgress={d.in_progress} /> },
               { key: "in", header: "Keldi", cell: (d) => formatTime(d.arrival), hideOnMobile: true },
               { key: "out", header: "Ketdi", cell: (d) => formatTime(d.departure), hideOnMobile: true },

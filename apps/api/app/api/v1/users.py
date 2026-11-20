@@ -10,13 +10,13 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import DbSession
-from app.api.errors import AppError, conflict, not_found
+from app.api.errors import AppError, conflict, not_found, validation_error
 from app.auth import passwords, service
 from app.auth.client_ip import client_ip
 from app.auth.dependencies import AuthContext, require
 from app.auth.permissions import Permission
 from app.db import audit
-from app.models import User
+from app.models import Branch, User
 from app.models.enums import ActorType, UserRole
 from app.schemas.auth import PasswordReset, UserAdminOut, UserCreate, UserUpdate
 from app.schemas.common import Page
@@ -37,14 +37,27 @@ def _policy_error(problems: list[str], field: str = "password") -> AppError:
     )
 
 
-async def _get_user(db: DbSession, user_id: uuid.UUID, lock: bool = False) -> User:
-    stmt = select(User).where(User.id == user_id)
+async def _get_user(
+    db: DbSession, ctx: AuthContext, user_id: uuid.UUID, lock: bool = False
+) -> User:
+    stmt = select(User).where(User.id == user_id, ctx.scope(User.branch_id))
     if lock:
         stmt = stmt.with_for_update()
     user = (await db.execute(stmt)).scalar_one_or_none()
     if user is None:
         raise not_found("User")
     return user
+
+
+def _plain(v: Any) -> Any:
+    if isinstance(v, uuid.UUID):
+        return str(v)
+    return v.value if hasattr(v, "value") else v
+
+
+async def _check_branch(db: DbSession, branch_id: uuid.UUID) -> None:
+    if await db.get(Branch, branch_id) is None:
+        raise validation_error("branch_id", "not_found", "Branch not found.")
 
 
 async def _other_active_super_admins(db: DbSession, exclude: uuid.UUID) -> int:
@@ -59,7 +72,7 @@ async def _other_active_super_admins(db: DbSession, exclude: uuid.UUID) -> int:
 
 @router.get("", response_model=Page[UserAdminOut], summary="List users")
 async def list_users(
-    _: ReadUsers,
+    ctx: ReadUsers,
     db: DbSession,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -67,7 +80,7 @@ async def list_users(
     is_active: bool | None = None,
     q: Annotated[str | None, Query(max_length=64)] = None,
 ) -> Page[UserAdminOut]:
-    conds: list[Any] = []
+    conds: list[Any] = [ctx.scope(User.branch_id)]
     if role is not None:
         conds.append(User.role == role)
     if is_active is not None:
@@ -105,7 +118,10 @@ async def create_user(
 ) -> UserAdminOut:
     if problems := passwords.policy_violations(body.password, body.username):
         raise _policy_error(problems)
+    branch = body.branch_id or ctx.write_branch
+    await _check_branch(db, branch)
     user = User(
+        branch_id=branch,
         username=body.username,
         email=body.email,
         role=body.role,
@@ -128,15 +144,19 @@ async def create_user(
         entity_type="user",
         entity_id=user.id,
         ip=client_ip(request),
-        changes={"username": [None, user.username], "role": [None, user.role.value]},
+        changes={
+            "username": [None, user.username],
+            "role": [None, user.role.value],
+            "branch_id": [None, str(user.branch_id)],
+        },
     )
     await db.refresh(user)
     return UserAdminOut.model_validate(user)
 
 
 @router.get("/{user_id}", response_model=UserAdminOut, responses={404: {}}, summary="Get a user")
-async def get_user(user_id: uuid.UUID, _: ReadUsers, db: DbSession) -> UserAdminOut:
-    return UserAdminOut.model_validate(await _get_user(db, user_id))
+async def get_user(user_id: uuid.UUID, ctx: ReadUsers, db: DbSession) -> UserAdminOut:
+    return UserAdminOut.model_validate(await _get_user(db, ctx, user_id))
 
 
 @router.patch(
@@ -148,10 +168,14 @@ async def get_user(user_id: uuid.UUID, _: ReadUsers, db: DbSession) -> UserAdmin
 async def update_user(
     user_id: uuid.UUID, body: UserUpdate, ctx: WriteUsers, request: Request, db: DbSession
 ) -> UserAdminOut:
-    user = await _get_user(db, user_id, lock=True)
+    user = await _get_user(db, ctx, user_id, lock=True)
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise AppError(422, "VALIDATION_ERROR", "Validation failed", "No fields to update.")
+    if changes.get("branch_id") is not None:
+        await _check_branch(db, changes["branch_id"])
+    elif "branch_id" in changes:
+        del changes["branch_id"]
 
     demoting = user.role == UserRole.SUPER_ADMIN and (
         changes.get("role", UserRole.SUPER_ADMIN) != UserRole.SUPER_ADMIN
@@ -165,8 +189,8 @@ async def update_user(
         old = getattr(user, field)
         if old != value:
             diff[field] = [
-                old.value if hasattr(old, "value") else old,
-                value.value if hasattr(value, "value") else value,
+                _plain(old),
+                _plain(value),
             ]
             setattr(user, field, value)
     try:
@@ -201,7 +225,7 @@ async def update_user(
 async def reset_password(
     user_id: uuid.UUID, body: PasswordReset, ctx: WriteUsers, request: Request, db: DbSession
 ) -> None:
-    user = await _get_user(db, user_id, lock=True)
+    user = await _get_user(db, ctx, user_id, lock=True)
     if problems := passwords.policy_violations(body.new_password, user.username):
         raise _policy_error(problems, "new_password")
     user.password_hash = await passwords.hash_password(body.new_password)
@@ -227,7 +251,7 @@ async def reset_password(
     summary="Clear a temporary login lock",
 )
 async def unlock_user(user_id: uuid.UUID, ctx: WriteUsers, request: Request, db: DbSession) -> None:
-    user = await _get_user(db, user_id, lock=True)
+    user = await _get_user(db, ctx, user_id, lock=True)
     user.failed_login_count = 0
     user.locked_until = None
     await audit.record(
@@ -250,7 +274,7 @@ async def unlock_user(user_id: uuid.UUID, ctx: WriteUsers, request: Request, db:
 async def revoke_sessions(
     user_id: uuid.UUID, ctx: WriteUsers, request: Request, db: DbSession
 ) -> None:
-    await _get_user(db, user_id)
+    await _get_user(db, ctx, user_id)
     await service.revoke_user_sessions(db, user_id, "ADMIN")
     await audit.record(
         db,

@@ -108,6 +108,7 @@ def to_out(row: Any) -> EmployeeOut:
         first_name=e.first_name,
         middle_name=e.middle_name,
         full_name=" ".join(parts),
+        branch_id=e.branch_id,
         department=DepartmentRef(id=e.department_id, name=row.department_name),
         work_schedule_id=e.work_schedule_id,
         position_title=e.position_title,

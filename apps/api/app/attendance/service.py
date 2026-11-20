@@ -298,6 +298,19 @@ class IngestResult:
     day: engine.DayResult | None
 
 
+async def serves_employee(db: AsyncSession, camera: Camera, emp: Employee) -> bool:
+    """Does this camera record attendance for the employee's department? A camera with no
+    departments serves everyone; assigned departments include their sub-departments."""
+    if not camera.department_ids:
+        return True
+    from app.services.employees import department_subtree_ids  # local: avoids an import cycle
+
+    for root in camera.department_ids:
+        if emp.department_id in await department_subtree_ids(db, root):
+            return True
+    return False
+
+
 async def ingest_camera_event(
     db: AsyncSession,
     *,
@@ -389,6 +402,10 @@ async def ingest_camera_event(
         reason = IgnoreReason.NOT_BIOMETRIC
     elif mode is CameraMode.NONE:
         reason = IgnoreReason.MONITOR_ONLY
+    elif emp.branch_id != camera.branch_id:
+        reason = IgnoreReason.OTHER_BRANCH
+    elif camera.department_ids and not await serves_employee(db, camera, emp):
+        reason = IgnoreReason.OTHER_DEPARTMENT
     else:
         # Debounce: any earlier/later matched sighting of this employee at this camera.
         near = (

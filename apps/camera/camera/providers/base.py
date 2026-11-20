@@ -34,6 +34,7 @@ class StreamInfo:
     height: int | None = None
     reported_fps: float | None = None
     backend: str = ""
+    codec: str | None = None  # FOURCC as reported by the decoder, e.g. "hevc", "h264"
 
 
 class FrameSource(Protocol):

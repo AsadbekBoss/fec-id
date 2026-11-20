@@ -29,6 +29,7 @@ import {
   DayStatusBadge,
   EmployeeStatusBadge,
 } from "@/components/entities";
+import { EmployeeTelegramCard } from "@/components/employee-telegram";
 import { FaceTemplatesCard } from "@/components/face-templates";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -137,6 +138,7 @@ function EmployeeDetail() {
           {can("biometrics:read") && e.attendance_method === "FACE" && (e.biometric.can_enroll || e.biometric.face_templates > 0) ? (
             <FaceTemplatesCard employee={e} onChanged={emp.reload} />
           ) : null}
+          <EmployeeTelegramCard employee={e} />
         </div>
       </div>
 

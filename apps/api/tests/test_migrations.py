@@ -33,6 +33,9 @@ EXPECTED_TABLES = {
     "system_settings",
     "auth_sessions",
     "refresh_tokens",
+    "telegram_recipients",
+    "notification_log",
+    "branches",
 }
 
 
@@ -69,7 +72,7 @@ def test_upgrade_downgrade_roundtrip(fresh_db: URL) -> None:
     assert _tables(fresh_db) == EXPECTED_TABLES
     head = ScriptDirectory.from_config(cfg).get_current_head()
     assert _query(fresh_db, "SELECT version_num FROM alembic_version") == [(head,)]
-    assert _query(fresh_db, "SELECT count(*) FROM system_settings")[0][0] == 16
+    assert _query(fresh_db, "SELECT count(*) FROM system_settings")[0][0] == 22
 
     command.downgrade(cfg, "base")
     assert _tables(fresh_db) == set()

@@ -48,6 +48,28 @@ npm run dev:web     # Next.js on http://localhost:3000
 
 If PostgreSQL is not running, the API **still starts**. `/health` returns `200`, and `/ready` returns `503` with `"database": false`.
 
+## Run everything with one command
+
+After the one-time setup above (and `npm run rec:setup`, `npm run cam:setup`):
+
+```bash
+npm start               # API + recognition + camera + web (production build), http://localhost:3000
+npm run status          # what is running, restarts, last errors
+npm run stop            # stop everything (also the copy started at logon)
+npm start -- --dev      # same with hot reload
+npm start -- --only api,web   # only some services (api is always required)
+npm run autostart       # Windows: start automatically 20 s after this user logs on
+npm run autostart:remove
+```
+
+`tools/run.mjs` starts the API first, then the other services. It restarts a service that exits
+or stops answering its health check for 1 minute (backoff 2 s → 60 s), rebuilds the web app when
+its sources changed, and refuses to start if a port is already taken (close old `dev:*` terminals).
+Output goes to `logs/<service>.log` (rotated at 10 MB; `logs/` is git-ignored). PostgreSQL is a
+Windows service and is not managed by it. The web page **Tizim holati** (`/system`, admins) shows
+the database, services, last backup, free disk and the supervised processes. Keep the computer
+from sleeping (Power settings) if it is the attendance station.
+
 ## Option B — Full stack in Docker
 
 ```bash
@@ -159,6 +181,20 @@ Profile photos and signed consent forms are stored **encrypted** under `STORAGE_
 | `apps/web/.env.example` → `apps/web/.env.local` | Next.js | Only `.example` |
 
 Secrets are never stored in source code. The API **refuses to start** if `POSTGRES_PASSWORD` is missing. `npm run setup` generates random local passwords.
+
+## Backups (encrypted)
+
+```bash
+npm run backup                 # encrypted backup of the database + stored files -> backups/ (keeps 14)
+npm run backup:verify          # decrypt + check the newest backup (changes nothing)
+npm run backup:keys -- --out E:/attendance-keys.attkeys   # keys, passphrase-protected: keep on a USB stick
+npm run backup:schedule        # Windows: daily backup at 20:00 (backup:schedule -- 21:30, or -- --remove)
+npm run backup:restore -- backups/<file>.attbak --database <empty_db> [--storage <dir>] [--force]
+```
+
+A backup can only be opened with the encryption keys (`DATA_ENCRYPTION_KEYS`). **Keep the key file
+away from the backups** (different device). Copy `backups/` to another disk or cloud regularly:
+a backup on the same laptop does not survive a broken laptop.
 
 ## Project structure
 

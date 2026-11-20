@@ -8,8 +8,10 @@ import { canEnableRecognition, cameraBody, cameraPatch, emptyForm, formFromCamer
 import { errorMessage, fieldErrors } from "@/lib/errors";
 import { formatDate, formatTime } from "@/lib/format";
 import { CAMERA_DIRECTION, CAMERA_ERROR, CAMERA_PROVIDER, QUALITY_REASON, QUALITY_STATUS } from "@/lib/labels";
-import type { Camera, CameraDirection, CameraProvider, Page, ProbeResult, QualityReport, TestSimulate } from "@/lib/types";
+import type { Branch, Camera, CameraDirection, CameraProvider, Page, ProbeResult, QualityReport, TestSimulate } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
+import { HEALTH_VERDICT, healthAdvice } from "@/lib/camera-health";
+import { cn } from "@/lib/cn";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,6 +19,7 @@ import { Card } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm";
 import { DetailItem, FilterBar, RequirePermission } from "@/components/ui/controls";
 import { Checkbox, Field, FormError, Input, PasswordInput, Select } from "@/components/ui/form";
+import { useDepartments } from "@/components/entities";
 import { Modal } from "@/components/ui/modal";
 import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/spinner";
@@ -104,6 +107,12 @@ function Cameras() {
               ),
             },
             { key: "dir", header: "Yoʻnalish", cell: (c) => CAMERA_DIRECTION[c.direction].label },
+            {
+              key: "depts",
+              header: "Boʻlimlar",
+              hideOnMobile: true,
+              cell: (c) => <DepartmentNames ids={c.department_ids} />,
+            },
             { key: "provider", header: "Turi", cell: (c) => CAMERA_PROVIDER[c.provider].label, hideOnMobile: true },
             {
               key: "status",
@@ -115,6 +124,20 @@ function Cameras() {
                   <span title={v.hint ?? c.last_error ?? undefined}>
                     <Badge tone={v.tone}>{v.label}</Badge>
                     {fps && !c.monitoring?.stale ? <span className="ml-2 text-xs text-muted tabular-nums">{fps} kadr/s</span> : null}
+                  </span>
+                );
+              },
+            },
+            {
+              key: "health",
+              header: "Salomatlik",
+              cell: (c) => {
+                const h = !c.monitoring?.stale ? c.monitoring?.runtime?.health : null;
+                if (!c.is_enabled || !h) return <span className="text-muted">—</span>;
+                const warn = h.issues.filter((i) => i.severity !== "tip");
+                return (
+                  <span title={warn.map((i) => healthAdvice(i).title).join("; ") || undefined}>
+                    <Badge tone={HEALTH_VERDICT[h.verdict].tone}>{HEALTH_VERDICT[h.verdict].label}</Badge>
                   </span>
                 );
               },
@@ -198,9 +221,13 @@ function CameraDetails({ camera: c, writable, onClose, onChanged }: { camera: Ca
               <DetailItem label="Oxirgi kadr">{c.last_seen_at ? `${formatDate(c.last_seen_at)} ${formatTime(c.last_seen_at)}` : "—"}</DetailItem>
               <DetailItem label="Qayta ulanishlar">{rt?.reconnects ?? "—"}</DetailItem>
               <DetailItem label="Oʻqish xatolari">{rt?.read_failures ?? "—"}</DetailItem>
+              <DetailItem label="Kodek">{rt?.codec ?? "—"}</DetailItem>
+              <DetailItem label="Kompyuter yuklamasi">{rt?.cpu_percent != null ? `${Math.round(rt.cpu_percent)}% (bir yadro)` : "—"}</DetailItem>
               <DetailItem label="Xato">{c.last_error ? <span className="text-danger-700">{(rt?.error_code && CAMERA_ERROR[rt.error_code]) || c.last_error}</span> : "—"}</DetailItem>
             </dl>
           </section>
+
+          <HealthSection camera={c} />
 
           {writable ? (
             <section className="flex flex-wrap gap-2">
@@ -360,6 +387,8 @@ function QualityDetails({ report: r, testedAt }: { report: QualityReport; tested
 function CameraFormModal({ camera, onClose, onSaved }: { camera: Camera | null; onClose: () => void; onSaved: (c: Camera) => void }) {
   const toast = useToast();
   const [f, setF] = useState<CameraForm>(() => (camera ? formFromCamera(camera) : emptyForm()));
+  const { allBranches, branchId, homeBranch } = useAuth();
+  const branchList = useApiQuery<Branch[]>(allBranches ? "/branches" : null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -429,6 +458,28 @@ function CameraFormModal({ camera, onClose, onSaved }: { camera: Camera | null; 
             </Select>
           </Field>
         </div>
+
+        {allBranches && (branchList.data?.length ?? 0) > 1 ? (
+          <Field label="Filial" hint="Kamera faqat shu filial xodimlarini davomatga yozadi. Boshqa filial xodimlari taniladi, lekin hisoblanmaydi.">
+            <Select
+              value={f.branch_id || branchId || ""}
+              onChange={(e) => setF((prev) => ({ ...prev, branch_id: e.target.value, department_ids: [] }))}
+            >
+              {!f.branch_id && !branchId ? <option value="">Markaz (asosiy)</option> : null}
+              {(branchList.data ?? []).map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        ) : null}
+
+        <DepartmentPicker
+          value={f.department_ids}
+          branchId={f.branch_id || branchId || homeBranch?.id || null}
+          onChange={(v) => set("department_ids", v)}
+        />
 
         {f.provider === "RTSP" ? (
           <fieldset className="grid grid-cols-1 gap-4 rounded-lg border border-line p-4 sm:grid-cols-2">
@@ -515,4 +566,91 @@ function CameraFormModal({ camera, onClose, onSaved }: { camera: Camera | null; 
       </form>
     </Modal>
   );
+}
+
+/** Automatic health check: verdict plus what to change on the camera. */
+function HealthSection({ camera: c }: { camera: Camera }) {
+  const h = c.is_enabled && !c.monitoring?.stale ? c.monitoring?.runtime?.health : null;
+  if (!h) return null;
+  const v = HEALTH_VERDICT[h.verdict];
+  return (
+    <section>
+      <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-navy-900">
+        Avtomatik tekshiruv <Badge tone={v.tone}>{v.label}</Badge>
+      </h3>
+      {h.issues.length === 0 ? (
+        <p className="text-sm text-success-700">Kamera davomat uchun yaxshi ishlayapti: kadrlar yoʻqolmayapti, yuklama meʼyorda.</p>
+      ) : (
+        <ul className="space-y-2">
+          {h.issues.map((i) => {
+            const a = healthAdvice(i);
+            return (
+              <li
+                key={i.code}
+                className={cn(
+                  "rounded-lg border px-3 py-2 text-sm",
+                  i.severity === "bad" ? "border-danger-600/30 bg-danger-50" : i.severity === "warn" ? "border-warning-600/30 bg-warning-50" : "border-line bg-subtle",
+                )}
+              >
+                <p className="font-medium text-navy-900">
+                  {i.severity === "tip" ? "💡 " : "⚠️ "}
+                  {a.title}
+                </p>
+                {a.fix ? <p className="text-xs text-muted">{a.fix}</p> : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="mt-2 text-xs text-muted">Har bir necha soniyada qayta baholanadi. “Diqqat” holati Telegramga kuniga bir marta xabar qilinadi.</p>
+    </section>
+  );
+}
+
+/** Which departments a camera counts attendance for. Empty = everyone (e.g. the main entrance). */
+function DepartmentPicker({
+  value,
+  onChange,
+  branchId,
+}: {
+  value: string[];
+  onChange: (v: string[]) => void;
+  /** Only departments of the camera's branch can be served. */
+  branchId: string | null;
+}) {
+  const { tree: allDepts, loading } = useDepartments();
+  const tree = branchId ? allDepts.filter((d) => d.branch_id === branchId) : allDepts;
+  const all = value.length === 0;
+  const toggle = (id: string, on: boolean) => onChange(on ? [...value, id] : value.filter((x) => x !== id));
+  return (
+    <fieldset className="rounded-lg border border-line p-4">
+      <legend className="px-1 text-sm font-medium text-navy-900">Boʻlimlar</legend>
+      <p className="mb-3 text-xs text-muted">
+        Hech biri tanlanmasa, kamera <b>barcha xodimlar</b> uchun ishlaydi (asosiy kirish). Tanlansa, davomatga faqat shu
+        boʻlim(lar) va ularning ichki boʻlimlari xodimlari yoziladi. Boshqalar baribir toʻgʻri taniladi, lekin “Boshqa boʻlim” deb
+        jurnalga yoziladi.
+      </p>
+      {loading ? <p className="text-sm text-muted">Yuklanmoqda…</p> : null}
+      <div className="grid max-h-48 grid-cols-1 gap-1 overflow-y-auto sm:grid-cols-2">
+        {tree.map((d) => (
+          <Checkbox
+            key={d.id}
+            label={<span style={{ paddingLeft: d.depth * 12 }}>{d.name}</span>}
+            checked={value.includes(d.id)}
+            onChange={(e) => toggle(d.id, e.target.checked)}
+          />
+        ))}
+      </div>
+      <p className="mt-2 text-xs font-medium text-navy-900">
+        {all ? "Barcha xodimlar" : `Tanlangan: ${value.length} ta boʻlim`}
+      </p>
+    </fieldset>
+  );
+}
+
+function DepartmentNames({ ids }: { ids: string[] }) {
+  const { data } = useDepartments();
+  if (!ids || ids.length === 0) return <span className="text-muted">Barchasi</span>;
+  const names = ids.map((id) => data?.find((d) => d.id === id)?.name ?? "…");
+  return <span className="text-sm">{names.join(", ")}</span>;
 }

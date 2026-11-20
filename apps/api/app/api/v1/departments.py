@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from app.api import scope
 from app.api.deps import DbSession
 from app.api.errors import conflict, not_found, validation_error
 from app.auth.client_ip import client_ip
@@ -17,7 +18,7 @@ from app.auth.dependencies import AuthContext, require
 from app.auth.permissions import Permission
 from app.core.text import normalize_name
 from app.db import audit
-from app.models import Department, Employee, WorkSchedule
+from app.models import Department, Employee
 from app.models.enums import ActorType
 from app.schemas.employees import DepartmentCreate, DepartmentOut, DepartmentUpdate
 from app.services.employees import is_ancestor_or_self
@@ -38,10 +39,14 @@ def _employee_count() -> Any:
     )
 
 
-async def _get(db: DbSession, dept_id: uuid.UUID) -> Department:
+async def _get(db: DbSession, ctx: AuthContext, dept_id: uuid.UUID) -> Department:
     d = (
         await db.execute(
-            select(Department).where(Department.id == dept_id, Department.deleted_at.is_(None))
+            select(Department).where(
+                Department.id == dept_id,
+                Department.deleted_at.is_(None),
+                ctx.scope(Department.branch_id),
+            )
         )
     ).scalar_one_or_none()
     if d is None:
@@ -72,10 +77,10 @@ async def _flush_or_conflict(db: DbSession) -> None:
 
 
 @router.get("", response_model=list[DepartmentOut], summary="List departments (flat)")
-async def list_departments(_: Reader, db: DbSession) -> list[DepartmentOut]:
+async def list_departments(ctx: Reader, db: DbSession) -> list[DepartmentOut]:
     rows = await db.execute(
         select(Department, _employee_count().label("n"))
-        .where(Department.deleted_at.is_(None))
+        .where(Department.deleted_at.is_(None), ctx.scope(Department.branch_id))
         .order_by(Department.name)
     )
     result = []
@@ -96,9 +101,12 @@ async def list_departments(_: Reader, db: DbSession) -> list[DepartmentOut]:
 async def create_department(
     body: DepartmentCreate, ctx: Writer, request: Request, db: DbSession
 ) -> DepartmentOut:
+    branch = ctx.write_branch
     if body.parent_id is not None:
-        await _get(db, body.parent_id)
-    d = Department(name=normalize_name(body.name), code=body.code, parent_id=body.parent_id)
+        await scope.same_branch_department(db, branch, body.parent_id, "parent_id")
+    d = Department(
+        name=normalize_name(body.name), code=body.code, parent_id=body.parent_id, branch_id=branch
+    )
     db.add(d)
     await _flush_or_conflict(db)
     await audit.record(
@@ -126,24 +134,23 @@ async def create_department(
 async def update_department(
     department_id: uuid.UUID, body: DepartmentUpdate, ctx: Writer, request: Request, db: DbSession
 ) -> DepartmentOut:
-    d = await _get(db, department_id)
+    d = await _get(db, ctx, department_id)
     changes = body.model_dump(exclude_unset=True)
     if "name" in changes:
         if not changes["name"]:
             raise validation_error("name", "required", "name cannot be null")
         changes["name"] = normalize_name(changes["name"])
     if changes.get("parent_id") is not None:
-        await _get(db, changes["parent_id"])
+        await scope.same_branch_department(db, d.branch_id, changes["parent_id"], "parent_id")
         if await is_ancestor_or_self(db, changes["parent_id"], d.id):
             raise validation_error(
                 "parent_id", "cycle", "A department cannot be moved under itself."
             )
     if changes.get("work_schedule_id") is not None:
-        if await db.get(WorkSchedule, changes["work_schedule_id"]) is None:
-            raise validation_error("work_schedule_id", "not_found", "Work schedule not found.")
+        await scope.same_branch_schedule(db, d.branch_id, changes["work_schedule_id"])
     if changes.get("head_employee_id") is not None:
         head = await db.get(Employee, changes["head_employee_id"])
-        if head is None or head.deleted_at is not None:
+        if head is None or head.deleted_at is not None or head.branch_id != d.branch_id:
             raise validation_error("head_employee_id", "not_found", "Employee not found.")
     diff = {}
     for k, v in changes.items():
@@ -175,7 +182,7 @@ async def update_department(
 async def delete_department(
     department_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession
 ) -> None:
-    d = await _get(db, department_id)
+    d = await _get(db, ctx, department_id)
     has_staff = (
         await db.execute(
             select(func.count())

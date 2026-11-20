@@ -96,6 +96,7 @@ class DepartmentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    branch_id: uuid.UUID
     name: str
     code: str | None
     parent_id: uuid.UUID | None
@@ -236,6 +237,7 @@ class EmployeeOut(BaseModel):
     first_name: str
     middle_name: str | None
     full_name: str
+    branch_id: uuid.UUID
     department: DepartmentRef
     work_schedule_id: uuid.UUID | None
     position_title: str | None

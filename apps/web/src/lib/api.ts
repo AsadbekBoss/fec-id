@@ -47,6 +47,7 @@ export type CurrentUser = {
   username: string;
   email: string | null;
   role: "SUPER_ADMIN" | "ADMIN" | "VIEWER";
+  branch_id: string;
   is_active: boolean;
   locale: string;
   last_login_at: string | null;
@@ -57,6 +58,10 @@ export type MeResponse = {
   user: CurrentUser;
   permissions: string[];
   session: { id: string; created_at: string; expires_at: string };
+  /** The user's own branch. */
+  branch: { id: string; name: string };
+  /** May see every branch and switch between them (super administrator). */
+  all_branches: boolean;
 };
 
 type Fetch = typeof fetch;
@@ -86,11 +91,17 @@ export class ApiClient {
   private accessToken: string | null = null;
   private refreshing: Promise<string | null> | null = null;
   private sessionEndedListener: (() => void) | null = null;
+  /** Branch selected in the switcher (sent as X-Branch-Id); null = every branch. */
+  private branchId: string | null = null;
 
   constructor(private readonly fetchImpl: Fetch = (...a) => fetch(...a)) {}
 
   setAccessToken(token: string | null): void {
     this.accessToken = token;
+  }
+
+  setBranch(id: string | null): void {
+    this.branchId = id;
   }
 
   hasAccessToken(): boolean {
@@ -178,6 +189,7 @@ export class ApiClient {
         headers: {
           ...(json !== undefined ? { "Content-Type": "application/json" } : {}),
           ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
+          ...(this.branchId ? { "X-Branch-Id": this.branchId } : {}),
           ...headers,
         },
         body: json !== undefined ? JSON.stringify(json) : rest.body,
@@ -207,6 +219,14 @@ export class ApiClient {
 
   get<T>(path: string): Promise<T> {
     return this.request<T>(path);
+  }
+
+  /**
+   * Authenticated streaming request (live camera preview): the caller reads `response.body`.
+   * The token travels in the Authorization header, never in the URL.
+   */
+  async stream(path: string, signal: AbortSignal): Promise<Response> {
+    return this.authorized(path, { signal });
   }
 
   /** Authenticated binary download (photos, signed consent forms). */

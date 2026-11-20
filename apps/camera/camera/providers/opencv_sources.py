@@ -10,6 +10,7 @@ import os
 import socket
 import sys
 import threading
+from typing import Any
 from urllib.parse import quote
 
 import cv2
@@ -32,7 +33,7 @@ class _CvSource:
             return StreamInfo(backend=backend)
         w, h = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = float(self._cap.get(cv2.CAP_PROP_FPS) or 0) or None
-        return StreamInfo(w or None, h or None, fps, backend)
+        return StreamInfo(w or None, h or None, fps, backend, _fourcc(self._cap))
 
     def grab(self) -> bool:
         return bool(self._cap is not None and self._cap.grab())
@@ -85,6 +86,16 @@ def tcp_reachable(host: str, port: int, timeout: float) -> bool:
             return True
     except OSError:
         return False
+
+
+def _fourcc(cap: Any) -> str | None:
+    """Codec FOURCC from the capture ("hevc", "h264", "MJPG" ...), None when unknown."""
+    try:
+        v = int(cap.get(cv2.CAP_PROP_FOURCC) or 0)
+    except (TypeError, ValueError):
+        return None
+    text = "".join(chr((v >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00 ")
+    return text if text.isprintable() and text else None
 
 
 class RtspSource(_CvSource):

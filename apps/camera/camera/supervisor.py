@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from camera.config import Settings
-from camera.live import LiveRecognizer, ObservationLog, Recognizer
+from camera.live import EventSink, LiveRecognizer, ObservationLog, Recognizer
 from camera.providers import registry
 from camera.providers.base import FrameSource
 from camera.spec import SourceSpec
@@ -23,6 +23,7 @@ class Supervisor:
         settings: Settings,
         factory: Callable[[SourceSpec], FrameSource] | None = None,
         recognizer: Recognizer | None = None,
+        sink: EventSink | None = None,
     ) -> None:
         self.settings = settings
         self._factory = factory or (lambda spec: registry.create(spec, settings))
@@ -30,6 +31,7 @@ class Supervisor:
         self._live: dict[str, LiveRecognizer] = {}
         self._lock = threading.Lock()
         self.recognizer = recognizer  # None = live recognition not configured
+        self.sink = sink  # None = recognitions are not reported to the Core API
         self.observations = ObservationLog()
 
     def _start(self, spec: SourceSpec) -> CameraWorker:
@@ -42,7 +44,14 @@ class Supervisor:
         )
         w.start()
         if spec.recognition_enabled and self.recognizer is not None:
-            live = LiveRecognizer(w, self.recognizer, self.observations, fps=s.live_recognition_fps)
+            live = LiveRecognizer(
+                w,
+                self.recognizer,
+                self.observations,
+                fps=s.live_recognition_fps,
+                sink=self.sink,
+                cooldown=s.attendance_event_cooldown_seconds,
+            )
             live.start()
             self._live[spec.camera_id] = live
         return w

@@ -14,9 +14,11 @@ import asyncio
 import getpass
 import re
 import sys
+from pathlib import Path
 
 from sqlalchemy import select
 
+from app import backup
 from app.auth import passwords
 from app.db import audit
 from app.db.session import dispose_engine, session_scope
@@ -65,6 +67,65 @@ async def _create_user(username: str, role: UserRole, email: str | None, passwor
         await dispose_engine()
 
 
+def _newest(folder: Path) -> Path:
+    files = sorted(p for p in folder.glob("attendance-*.attbak"))
+    if not files:
+        raise backup.BackupError(f"No backups in {folder}")
+    return files[-1]
+
+
+def _backup_command(args: argparse.Namespace) -> None:
+    if args.command == "backup":
+        res = backup.create_backup(Path(args.out) if args.out else backup.DEFAULT_DIR, args.keep)
+        rows = sum(res.tables.values())
+        print(f"Backup written: {res.path}")
+        print(
+            f"  {res.size / 1024:.0f} KB, {len(res.tables)} tables, {rows} rows, "
+            f"{res.storage_files} stored files"
+        )
+        print(
+            "  Encrypted. It can only be restored with the encryption keys (npm run backup:keys)."
+        )
+    elif args.command == "backup-verify":
+        path = Path(args.file) if args.file else _newest(backup.DEFAULT_DIR)
+        info = backup.verify_backup(path)
+        h = info["header"]
+        print(f"OK: {path.name}")
+        print(
+            f"  created {h['created_at']}, schema {h['schema_version']}, "
+            f"{sum(info['tables'].values())} rows, {info['storage_files']} stored files"
+        )
+    elif args.command == "backup-restore":
+        info = backup.restore_backup(
+            Path(args.file),
+            args.database,
+            storage_dir=Path(args.storage) if args.storage else None,
+            force=args.force,
+        )
+        print(f"Restored into database '{info['database']}' ({info['storage_files']} files).")
+    elif args.show:
+        keys = backup.read_keys(Path(args.show), backup.ask_passphrase(confirm=False))
+        for k in backup.KEY_FIELDS:
+            print(f"{k}={keys[k]}")
+        print(f"# exported_at {keys.get('exported_at')}")
+    else:
+        if not args.out:
+            raise backup.BackupError(
+                "Choose where to save the keys, AWAY from the backups (e.g. a USB stick): "
+                "npm run backup:keys -- --out E:/attendance-keys.attkeys"
+            )
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        backup.export_keys(out, backup.ask_passphrase(confirm=True))
+        print(f"Keys exported: {out}")
+        print(
+            "  Copy this file to a USB stick / password manager and keep it AWAY from the backups."
+        )
+        print(
+            "  Without the passphrase it cannot be opened. Without the keys, backups are useless."
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -72,7 +133,27 @@ def main(argv: list[str] | None = None) -> None:
     cu.add_argument("--username", required=True)
     cu.add_argument("--role", required=True, choices=[r.value for r in UserRole])
     cu.add_argument("--email")
+    bk = sub.add_parser("backup", help="Encrypted backup of the database + file storage")
+    bk.add_argument("--out", default=None, help="Folder (default: <repo>/backups)")
+    bk.add_argument("--keep", type=int, default=14, help="Keep the newest N backups (0 = all)")
+    vf = sub.add_parser("backup-verify", help="Decrypt and check a backup (no changes made)")
+    vf.add_argument("file", nargs="?", help="Backup file (default: newest)")
+    rs = sub.add_parser("backup-restore", help="Restore a backup into an EXISTING, empty database")
+    rs.add_argument("file")
+    rs.add_argument("--database", required=True)
+    rs.add_argument("--storage", help="Folder to restore stored files into (optional)")
+    rs.add_argument("--force", action="store_true", help="Allow overwriting the live DB/storage")
+    kx = sub.add_parser("backup-keys", help="Export encryption keys to a passphrase-protected file")
+    kx.add_argument("--out", help="Write the key file here")
+    kx.add_argument("--show", help="Decrypt a key file and print the keys (for disaster recovery)")
     args = parser.parse_args(argv)
+
+    if args.command in ("backup", "backup-verify", "backup-restore", "backup-keys"):
+        try:
+            _backup_command(args)
+        except backup.BackupError as e:
+            raise SystemExit(f"ERROR: {e}") from None
+        return
 
     if args.command == "create-user":
         if not re.fullmatch(USERNAME_PATTERN, args.username):

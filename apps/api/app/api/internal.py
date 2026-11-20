@@ -9,20 +9,40 @@ from __future__ import annotations
 
 import base64
 import hmac
+import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, Query, Response
-from pydantic import SecretStr
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile
+from pydantic import Field, SecretStr
 from sqlalchemy import select
 
 from app.api.deps import DbSession
 from app.api.errors import BEARER_CHALLENGE, AppError
+from app.attendance import service as attendance_svc
+from app.core import crypto, storage, uploads
 from app.core.config import get_settings
 from app.db import audit
-from app.models import BiometricConsent, Camera, Employee, FaceEmbedding
-from app.models.enums import ActorType, AttendanceMethod, CameraStatus, EmployeeStatus
+from app.models import (
+    AttendanceEvent,
+    BiometricConsent,
+    Camera,
+    Employee,
+    FaceEmbedding,
+    SystemSetting,
+)
+from app.models.enums import (
+    ActorType,
+    AttendanceMethod,
+    CameraQualityStatus,
+    CameraStatus,
+    EmployeeStatus,
+    EventSource,
+    RecognitionDecision,
+)
 from app.schemas.cameras import StatusBatch
+from app.schemas.common import StrictModel
+from app.services import reviews
 from app.services.camera_service import source_spec
 
 SERVICE = "camera-service"
@@ -160,3 +180,153 @@ async def gallery(
         for f in rows
     ]
     return {"templates": templates, "count": len(templates)}
+
+
+# --- recognition -> attendance (camera service) -----------------------------------------------
+
+
+class RecognitionEventIn(StrictModel):
+    event_uid: uuid.UUID
+    camera_id: uuid.UUID
+    employee_id: uuid.UUID
+    event_time: datetime
+    decision: Literal["MATCHED"]  # only confident identifications are ever sent
+    model_id: str = Field(min_length=1, max_length=64)
+    similarity: float | None = Field(default=None, ge=-1, le=1)
+    second_similarity: float | None = Field(default=None, ge=-1, le=1)
+    quality_score: float | None = Field(default=None, ge=0, le=1)
+
+
+@router.post("/recognition-events")
+async def recognition_event(body: RecognitionEventIn, _: Service, db: DbSession) -> dict[str, Any]:
+    """A confident recognition from a live camera. Becomes an attendance event ONLY when the
+    master switch `recognition.attendance_enabled` is on and the camera passed its quality
+    test with recognition enabled. All attendance rules (debounce, IN/OUT sequence, inactive
+    employees, manual-method employees) are applied by the attendance engine."""
+    enabled = await db.get(SystemSetting, "recognition.attendance_enabled")
+    if enabled is None or enabled.value is not True:
+        return {"recorded": False, "reason": "attendance_disabled"}
+    cam = await db.get(Camera, body.camera_id)
+    if (
+        cam is None
+        or cam.deleted_at is not None
+        or not cam.is_enabled
+        or not cam.recognition_enabled
+        or cam.quality_status is not CameraQualityStatus.PASSED
+    ):
+        return {"recorded": False, "reason": "camera_not_enabled"}
+    try:
+        res = await attendance_svc.ingest_camera_event(
+            db,
+            event_uid=body.event_uid,
+            camera_id=body.camera_id,
+            event_time=body.event_time,
+            decision=RecognitionDecision.MATCHED,
+            employee_id=body.employee_id,
+            model_id=body.model_id,
+            similarity=body.similarity,
+            second_similarity=body.second_similarity,
+            quality_score=body.quality_score,
+        )
+    except attendance_svc.EventRejected as e:
+        raise AppError(
+            422,
+            "EVENT_REJECTED",
+            "Event rejected",
+            e.message,
+            errors=[{"field": e.field, "code": e.code, "message": e.message}],
+        ) from None
+    ev = res.event
+    return {
+        "recorded": True,
+        "created": res.created,
+        "counted": ev.counts_for_attendance,
+        "direction": ev.direction.value if ev.direction else None,
+        "ignore_reason": ev.ignore_reason,
+        "work_date": ev.work_date.isoformat() if ev.work_date else None,
+    }
+
+
+# --- review queue: uncertain recognitions with a face crop (camera service) -----------------
+
+
+class ReviewMeta(StrictModel):
+    event_uid: uuid.UUID
+    camera_id: uuid.UUID
+    event_time: datetime
+    decision: Literal["AMBIGUOUS", "UNKNOWN"]
+    model_id: str = Field(min_length=1, max_length=64)
+    similarity: float | None = Field(default=None, ge=-1, le=1)
+    second_similarity: float | None = Field(default=None, ge=-1, le=1)
+    quality_score: float | None = Field(default=None, ge=0, le=1)
+
+
+@router.post("/recognition-reviews")
+async def recognition_review(
+    _: Service,
+    db: DbSession,
+    meta: Annotated[str, Form(max_length=4000)],
+    file: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    """Store an uncertain observation for a human decision. Gated like attendance: master switch,
+    review switch, camera passed its quality test; UNKNOWN faces only if allowed by settings."""
+    try:
+        m = ReviewMeta.model_validate_json(meta)
+    except ValueError:
+        raise AppError(422, "INVALID_META", "Invalid", "meta must be valid JSON.") from None
+    if await reviews.setting(db, "recognition.attendance_enabled", False) is not True:
+        return {"stored": False, "reason": "attendance_disabled"}
+    if await reviews.setting(db, "recognition.review_enabled", True) is not True:
+        return {"stored": False, "reason": "review_disabled"}
+    if m.decision == "UNKNOWN" and (
+        await reviews.setting(db, "recognition.store_unknown_snapshots", False) is not True
+    ):
+        return {"stored": False, "reason": "unknown_not_stored"}
+    cam = await db.get(Camera, m.camera_id)
+    if (
+        cam is None
+        or cam.deleted_at is not None
+        or not cam.is_enabled
+        or not cam.recognition_enabled
+        or cam.quality_status is not CameraQualityStatus.PASSED
+    ):
+        return {"stored": False, "reason": "camera_not_enabled"}
+    limits = await attendance_svc.load_settings(db)
+    now = datetime.now(UTC)
+    if m.event_time.tzinfo is None or m.event_time > now + limits.max_clock_skew:
+        raise AppError(422, "EVENT_REJECTED", "Event rejected", "event_time is in the future.")
+    if m.event_time < now - limits.max_event_age:
+        raise AppError(422, "EVENT_REJECTED", "Event rejected", "event_time is too old.")
+    if (
+        await db.execute(select(AttendanceEvent.id).where(AttendanceEvent.event_uid == m.event_uid))
+    ).first():
+        return {"stored": False, "reason": "duplicate"}
+    try:
+        clean = await uploads.clean_photo(await file.read(512 * 1024 + 1), 512 * 1024)
+    except uploads.UploadRejected as e:
+        raise AppError(422, "INVALID_FILE", "Invalid file", e.message) from None
+    await reviews.purge_expired(db, datetime.now(UTC))
+    key = storage.new_key("review_snapshots", cam.id)
+    await storage.put(key, clean.data, crypto.Purpose.SNAPSHOT)
+    ev = AttendanceEvent(
+        event_uid=m.event_uid,
+        event_time=m.event_time,
+        source=EventSource.CAMERA,
+        camera_id=cam.id,
+        decision=RecognitionDecision(m.decision),
+        model_id=m.model_id,
+        similarity=m.similarity,
+        second_similarity=m.second_similarity,
+        quality_score=m.quality_score,
+        counts_for_attendance=False,
+        ignore_reason="UNMATCHED",
+        snapshot_key=key,
+        review_status="PENDING",
+    )
+    db.add(ev)
+    try:
+        await db.flush()
+    except Exception:
+        await storage.delete(key)
+        raise
+    return {"stored": True, "review_id": ev.id}

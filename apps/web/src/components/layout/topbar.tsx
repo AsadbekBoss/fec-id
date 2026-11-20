@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, LogOut, Menu, ShieldCheck } from "lucide-react";
+import { Building, ChevronDown, LogOut, Menu, ShieldCheck } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
@@ -9,9 +9,10 @@ import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { findNavItem } from "@/components/layout/nav";
+import { BranchSwitcher } from "@/components/branch-switcher";
 
 function UserMenu() {
-  const { user, logout, sessionExpiresAt } = useAuth();
+  const { user, logout, sessionExpiresAt, homeBranch } = useAuth();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -74,6 +75,11 @@ function UserMenu() {
                 {t.roles[user.role] ?? user.role}
               </Badge>
             </div>
+            {homeBranch ? (
+              <p className="mt-2 flex items-center gap-1 text-xs text-muted">
+                <Building className="h-3 w-3" aria-hidden /> {homeBranch.name}
+              </p>
+            ) : null}
             {sessionExpiresAt ? (
               <p className="mt-2 text-xs text-muted">
                 Sessiya muddati: {formatDate(sessionExpiresAt)} {formatTime(sessionExpiresAt)}
@@ -105,7 +111,8 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
         <Menu className="h-5 w-5" />
       </Button>
       <p className="truncate text-sm font-medium text-muted">{current?.label ?? t.app.name}</p>
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-2">
+        <BranchSwitcher />
         <UserMenu />
       </div>
     </header>

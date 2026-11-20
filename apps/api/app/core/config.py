@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     recognition_gallery_token: SecretStr | None = None
     max_face_templates: int = Field(default=5, ge=1, le=20)  # per employee
 
+    # --- Telegram notifications (optional). Token from @BotFather. Never logged or returned. ---
+    telegram_bot_token: SecretStr | None = None
+    telegram_api_url: str = "https://api.telegram.org"
+
     # Argon2id parameters (OWASP-aligned defaults). Lower only in tests.
     argon2_time_cost: int = Field(default=3, ge=1)
     argon2_memory_kib: int = Field(default=65536, ge=1024)
@@ -99,6 +103,11 @@ class Settings(BaseSettings):
         if v is not None and v.get_secret_value() and len(v.get_secret_value()) < 24:
             raise ValueError("service tokens must be at least 24 characters")
         return v if v is not None and v.get_secret_value() else None
+
+    @field_validator("telegram_bot_token")
+    @classmethod
+    def _optional_token(cls, v: SecretStr | None) -> SecretStr | None:
+        return v if v is not None and v.get_secret_value().strip() else None
 
     @property
     def database_url(self) -> URL:

@@ -14,7 +14,7 @@ import { Topbar } from "@/components/layout/topbar";
  * every request without a valid session anyway.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { status } = useAuth();
+  const { status, branchId } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -45,7 +45,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <Sidebar mobileOpen={menuOpen} onClose={closeMenu} />
       <div className="lg:pl-64">
         <Topbar onMenu={() => setMenuOpen(true)} />
-        <main id="main" className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <main key={branchId ?? "all"} id="main" className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
           {children}
         </main>
       </div>

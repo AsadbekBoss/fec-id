@@ -43,6 +43,7 @@ def test_extract_returns_embedding_and_nearest() -> None:
     vec = np.frombuffer(base64.b64decode(body["embedding_b64"]), "<f4")
     assert np.allclose(vec, EMP)
     assert body["nearest"] == {"employee_id": "emp-9", "score": 1.0, "same_person_likely": True}
+    assert abs(body["yaw_deg"]) < 5 and abs(body["roll_deg"]) < 5  # frontal detection
 
 
 @pytest.mark.parametrize(("dets", "reason"), [

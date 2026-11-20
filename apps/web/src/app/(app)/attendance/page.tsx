@@ -8,7 +8,7 @@ import { addDays, todayInOrg } from "@/lib/time";
 import type { Board, Day } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { DayDetailModal } from "@/components/attendance/day-detail";
-import { DayStatusBadge, DepartmentSelect } from "@/components/entities";
+import { DayStatusBadge, DepartmentSelect, EmployeeAvatar } from "@/components/entities";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, StatCard } from "@/components/ui/card";
@@ -99,9 +99,12 @@ function Attendance() {
               key: "emp",
               header: "Xodim",
               cell: (d) => (
-                <div>
-                  <p className="font-medium text-navy-900">{d.employee.full_name}</p>
-                  <p className="font-mono text-xs text-muted">{d.employee.employee_code}</p>
+                <div className="flex items-center gap-3">
+                  <EmployeeAvatar employee={d.employee} className="h-10 w-10" />
+                  <div className="min-w-0">
+                    <p className="font-medium text-navy-900">{d.employee.full_name}</p>
+                    <p className="font-mono text-xs text-muted">{d.employee.employee_code}</p>
+                  </div>
                 </div>
               ),
             },

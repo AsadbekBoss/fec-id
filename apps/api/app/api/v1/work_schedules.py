@@ -36,8 +36,12 @@ def _out(ws: WorkSchedule) -> WorkScheduleOut:
     return out
 
 
-async def _get(db: DbSession, schedule_id: uuid.UUID, lock: bool = False) -> WorkSchedule:
-    stmt = select(WorkSchedule).where(WorkSchedule.id == schedule_id)
+async def _get(
+    db: DbSession, ctx: AuthContext, schedule_id: uuid.UUID, lock: bool = False
+) -> WorkSchedule:
+    stmt = select(WorkSchedule).where(
+        WorkSchedule.id == schedule_id, ctx.scope(WorkSchedule.branch_id)
+    )
     if lock:
         stmt = stmt.with_for_update()
     ws = (await db.execute(stmt)).scalar_one_or_none()
@@ -61,14 +65,20 @@ def _plain(v: Any) -> Any:
 
 
 @router.get("", response_model=list[WorkScheduleOut], summary="List work schedules")
-async def list_schedules(_: Reader, db: DbSession) -> list[WorkScheduleOut]:
-    rows = (await db.execute(select(WorkSchedule).order_by(WorkSchedule.name))).scalars()
+async def list_schedules(ctx: Reader, db: DbSession) -> list[WorkScheduleOut]:
+    rows = (
+        await db.execute(
+            select(WorkSchedule)
+            .where(ctx.scope(WorkSchedule.branch_id))
+            .order_by(WorkSchedule.name)
+        )
+    ).scalars()
     return [_out(w) for w in rows]
 
 
 @router.get("/{schedule_id}", response_model=WorkScheduleOut, responses={404: {}})
-async def get_schedule(schedule_id: uuid.UUID, _: Reader, db: DbSession) -> WorkScheduleOut:
-    return _out(await _get(db, schedule_id))
+async def get_schedule(schedule_id: uuid.UUID, ctx: Reader, db: DbSession) -> WorkScheduleOut:
+    return _out(await _get(db, ctx, schedule_id))
 
 
 @router.post(
@@ -81,7 +91,7 @@ async def get_schedule(schedule_id: uuid.UUID, _: Reader, db: DbSession) -> Work
 async def create_schedule(
     body: WorkScheduleCreate, ctx: Writer, request: Request, db: DbSession
 ) -> WorkScheduleOut:
-    ws = WorkSchedule(**body.model_dump())
+    ws = WorkSchedule(**body.model_dump(), branch_id=ctx.write_branch)
     db.add(ws)
     await _flush(db)
     await audit.record(
@@ -111,7 +121,7 @@ async def update_schedule(
     request: Request,
     db: DbSession,
 ) -> WorkScheduleOut:
-    ws = await _get(db, schedule_id, lock=True)
+    ws = await _get(db, ctx, schedule_id, lock=True)
     changes = body.model_dump(exclude_unset=True)
     try:
         _check_shape(
@@ -151,7 +161,7 @@ async def update_schedule(
 async def delete_schedule(
     schedule_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession
 ) -> None:
-    ws = await _get(db, schedule_id, lock=True)
+    ws = await _get(db, ctx, schedule_id, lock=True)
     used = (
         await db.execute(
             select(func.count())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 
 import numpy as np
 import pytest
@@ -14,6 +15,10 @@ from recognition.types import Detection
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
 MODEL_ID = "fake@1"
+
+# Tests never sync the gallery from a real Core API, even if the local .env points to one
+# (environment variables take precedence over the .env file).
+os.environ["CORE_API_URL"] = ""
 
 
 @pytest.fixture

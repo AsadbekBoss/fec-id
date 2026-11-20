@@ -53,6 +53,8 @@ class IgnoreReason(StrEnum):
     EMPLOYEE_INACTIVE = "EMPLOYEE_INACTIVE"  # not ACTIVE (suspended, terminated, on leave)
     NOT_BIOMETRIC = "NOT_BIOMETRIC"  # employee uses MANUAL attendance
     OUTSIDE_EMPLOYMENT = "OUTSIDE_EMPLOYMENT"  # before hire / after termination
+    OTHER_DEPARTMENT = "OTHER_DEPARTMENT"  # recognised, but the camera serves other departments
+    OTHER_BRANCH = "OTHER_BRANCH"  # recognised, but the employee belongs to another branch
 
 
 class DayStatus(StrEnum):

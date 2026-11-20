@@ -16,9 +16,10 @@ from app.auth.dependencies import CurrentUser
 from app.auth.rate_limit import SlidingWindowLimiter
 from app.core.config import get_settings
 from app.db import audit
-from app.models import AuthSession
+from app.models import AuthSession, Branch
 from app.models.enums import ActorType
 from app.schemas.auth import (
+    BranchRef,
     ChangePasswordRequest,
     LoginRequest,
     MeResponse,
@@ -165,11 +166,14 @@ async def me(ctx: CurrentUser, db: DbSession, response: Response) -> MeResponse:
     sess = await db.get(AuthSession, ctx.session_id)
     if sess is None:  # cannot happen after get_current_user, but never assume
         raise unauthorized("SESSION_ENDED")
+    own = await db.get(Branch, ctx.user.branch_id)
     response.headers.update(NO_STORE)
     return MeResponse(
         user=UserOut.model_validate(ctx.user),
         permissions=sorted(p.value for p in ctx.permissions),
         session=SessionInfo(id=sess.id, created_at=sess.created_at, expires_at=sess.expires_at),
+        branch=BranchRef.model_validate(own, from_attributes=True),
+        all_branches=ctx.all_branches,
     )
 
 

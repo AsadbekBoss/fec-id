@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import passwords, tokens
 from app.core.config import get_settings
 from app.db import audit
-from app.models import AuditLog, AuthSession, RefreshToken, User
-from app.models.enums import ActorType
+from app.models import AuditLog, AuthSession, Branch, RefreshToken, User
+from app.models.enums import ActorType, UserRole
 
 
 class FailureReason(StrEnum):
@@ -132,6 +132,11 @@ async def login(
             changes={"locked": bool(user and user.locked_until and user.locked_until > now)},
         )
         return Failure(FailureReason.INVALID_CREDENTIALS)
+
+    # A closed branch locks out its users (the super administrator is not bound to a branch).
+    if user.role != UserRole.SUPER_ADMIN:
+        if not await db.scalar(select(Branch.is_active).where(Branch.id == user.branch_id)):
+            return Failure(FailureReason.INVALID_CREDENTIALS)
 
     # 5. Success.
     user.failed_login_count = 0

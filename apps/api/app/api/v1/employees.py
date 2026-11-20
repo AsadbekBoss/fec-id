@@ -45,9 +45,9 @@ BioReader = Annotated[AuthContext, Depends(require(Permission.BIOMETRICS_READ))]
 BioWriter = Annotated[AuthContext, Depends(require(Permission.BIOMETRICS_WRITE))]
 
 _UNIQUE_CONFLICTS = {
-    "uq_employees_employee_code": (
+    "uq_employees_branch_id_employee_code": (
         "EMPLOYEE_CODE_EXISTS",
-        "An employee with this code already exists.",
+        "An employee with this code already exists in this branch.",
     ),
     "uq_employees_email_active": (
         "EMPLOYEE_EMAIL_EXISTS",
@@ -63,8 +63,12 @@ _UNIQUE_CONFLICTS = {
 # --- helpers ----------------------------------------------------------------------------------
 
 
-async def _get_employee(db: DbSession, employee_id: uuid.UUID, lock: bool = False) -> Employee:
-    stmt = select(Employee).where(Employee.id == employee_id, Employee.deleted_at.is_(None))
+async def _get_employee(
+    db: DbSession, ctx: AuthContext, employee_id: uuid.UUID, lock: bool = False
+) -> Employee:
+    stmt = select(Employee).where(
+        Employee.id == employee_id, Employee.deleted_at.is_(None), ctx.scope(Employee.branch_id)
+    )
     if lock:
         stmt = stmt.with_for_update()
     emp = (await db.execute(stmt)).scalar_one_or_none()
@@ -73,23 +77,24 @@ async def _get_employee(db: DbSession, employee_id: uuid.UUID, lock: bool = Fals
     return emp
 
 
-async def _check_refs(db: DbSession, department_id: Any, work_schedule_id: Any) -> None:
-    if department_id is not None:
-        ok = (
-            await db.execute(
-                select(Department.id).where(
-                    Department.id == department_id, Department.deleted_at.is_(None)
-                )
-            )
-        ).first()
-        if not ok:
-            raise validation_error("department_id", "not_found", "Department not found.")
-    if work_schedule_id is not None and await db.get(WorkSchedule, work_schedule_id) is None:
-        raise validation_error("work_schedule_id", "not_found", "Work schedule not found.")
+async def _department_branch(db: DbSession, ctx: AuthContext, department_id: Any) -> uuid.UUID:
+    """The branch of a visible department (an employee belongs to its department's branch)."""
+    d = await db.get(Department, department_id)
+    if d is None or d.deleted_at is not None or not ctx.sees(d.branch_id):
+        raise validation_error("department_id", "not_found", "Department not found.")
+    return d.branch_id
+
+
+async def _check_schedule(db: DbSession, branch_id: uuid.UUID, work_schedule_id: Any) -> None:
+    if work_schedule_id is not None:
+        ws = await db.get(WorkSchedule, work_schedule_id)
+        if ws is None or ws.branch_id != branch_id:
+            raise validation_error("work_schedule_id", "not_found", "Work schedule not found.")
 
 
 async def _check_duplicates(
     db: DbSession,
+    branch_id: uuid.UUID,
     code: str | None,
     email: str | None,
     phone: str | None,
@@ -97,8 +102,13 @@ async def _check_duplicates(
 ) -> None:
     """Friendly 409s before insert/update. Unique indexes remain the real guarantee."""
     checks: list[tuple[Any, str]] = []
-    if code is not None:  # codes are unique forever, also against deleted records
-        checks.append((Employee.employee_code == code, "uq_employees_employee_code"))
+    if code is not None:  # unique per branch forever, also against deleted records
+        checks.append(
+            (
+                (Employee.employee_code == code) & (Employee.branch_id == branch_id),
+                "uq_employees_branch_id_employee_code",
+            )
+        )
     if email is not None:
         checks.append(
             ((Employee.email == email) & Employee.deleted_at.is_(None), "uq_employees_email_active")
@@ -175,7 +185,7 @@ def _consent_out(c: BiometricConsent) -> ConsentOut:
 
 @router.get("", response_model=Page[EmployeeOut], summary="List / search / filter employees")
 async def list_employees(
-    _: Reader,
+    ctx: Reader,
     db: DbSession,
     q: Annotated[str | None, Query(max_length=100, description="Name or code contains")] = None,
     department_id: uuid.UUID | None = None,
@@ -190,7 +200,7 @@ async def list_employees(
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> Page[EmployeeOut]:
     stmt, bio_status = svc.employee_select()
-    conds: list[Any] = []
+    conds: list[Any] = [ctx.scope(Employee.branch_id)]
     if q and q.strip():
         term = f"%{escape_like(normalize_search(q))}%"
         conds.append(
@@ -233,9 +243,10 @@ async def list_employees(
 async def create_employee(
     body: EmployeeCreate, ctx: Writer, request: Request, db: DbSession
 ) -> EmployeeOut:
-    await _check_refs(db, body.department_id, body.work_schedule_id)
-    await _check_duplicates(db, body.employee_code, body.email, body.phone)
-    emp = Employee(**body.model_dump())
+    branch = await _department_branch(db, ctx, body.department_id)
+    await _check_schedule(db, branch, body.work_schedule_id)
+    await _check_duplicates(db, branch, body.employee_code, body.email, body.phone)
+    emp = Employee(**body.model_dump(), branch_id=branch)
     db.add(emp)
     await _flush(db)
     await audit.record(
@@ -254,7 +265,8 @@ async def create_employee(
 @router.get(
     "/{employee_id}", response_model=EmployeeOut, responses={404: {}}, summary="Employee details"
 )
-async def get_employee(employee_id: uuid.UUID, _: Reader, db: DbSession) -> EmployeeOut:
+async def get_employee(employee_id: uuid.UUID, ctx: Reader, db: DbSession) -> EmployeeOut:
+    await _get_employee(db, ctx, employee_id)
     return await _out(db, employee_id)
 
 
@@ -267,12 +279,20 @@ async def get_employee(employee_id: uuid.UUID, _: Reader, db: DbSession) -> Empl
 async def update_employee(
     employee_id: uuid.UUID, body: EmployeeUpdate, ctx: Writer, request: Request, db: DbSession
 ) -> EmployeeOut:
-    emp = await _get_employee(db, employee_id, lock=True)
+    emp = await _get_employee(db, ctx, employee_id, lock=True)
     changes = body.model_dump(exclude_unset=True)
-    await _check_refs(db, changes.get("department_id"), changes.get("work_schedule_id"))
+    branch = emp.branch_id
+    if changes.get("department_id") is not None:
+        # Moving to a department of another branch moves the employee to that branch (only a
+        # user who sees both branches can do it). The schedule must belong to the new branch.
+        branch = await _department_branch(db, ctx, changes["department_id"])
+    await _check_schedule(db, branch, changes.get("work_schedule_id", emp.work_schedule_id))
+    code = changes.get("employee_code") or (emp.employee_code if branch != emp.branch_id else None)
     await _check_duplicates(
-        db, changes.get("employee_code"), changes.get("email"), changes.get("phone"), exclude=emp.id
+        db, branch, code, changes.get("email"), changes.get("phone"), exclude=emp.id
     )
+    if branch != emp.branch_id:
+        changes["branch_id"] = branch
     new_hire = changes.get("hire_date", emp.hire_date)
     if emp.termination_date and new_hire > emp.termination_date:
         raise validation_error(
@@ -323,7 +343,7 @@ async def deactivate_employee(
     request: Request,
     db: DbSession,
 ) -> EmployeeOut:
-    emp = await _get_employee(db, employee_id, lock=True)
+    emp = await _get_employee(db, ctx, employee_id, lock=True)
     target = EmployeeStatus(body.status.value)
     if emp.status == target:
         raise conflict("INVALID_STATUS_TRANSITION", f"Employee is already {target.value}.")
@@ -370,7 +390,7 @@ async def activate_employee(
     db: DbSession,
     body: EmployeeActivate | None = None,
 ) -> EmployeeOut:
-    emp = await _get_employee(db, employee_id, lock=True)
+    emp = await _get_employee(db, ctx, employee_id, lock=True)
     if emp.status == EmployeeStatus.ACTIVE:
         raise conflict("INVALID_STATUS_TRANSITION", "Employee is already ACTIVE.")
     old = emp.status
@@ -407,7 +427,7 @@ async def put_photo(
     db: DbSession,
     file: Annotated[UploadFile, File(description="JPEG or PNG, max 5 MB")],
 ) -> EmployeeOut:
-    emp = await _get_employee(db, employee_id, lock=True)
+    emp = await _get_employee(db, ctx, employee_id, lock=True)
     limit = get_settings().max_photo_bytes
     try:
         clean = await uploads.clean_photo(await _read_upload(file, limit), limit)
@@ -445,8 +465,8 @@ async def put_photo(
     response_class=Response,
     summary="Download profile photo",
 )
-async def get_photo(employee_id: uuid.UUID, _: Reader, db: DbSession) -> Response:
-    emp = await _get_employee(db, employee_id)
+async def get_photo(employee_id: uuid.UUID, ctx: Reader, db: DbSession) -> Response:
+    emp = await _get_employee(db, ctx, employee_id)
     if not emp.photo_key:
         raise not_found("Photo")
     try:
@@ -469,7 +489,7 @@ async def get_photo(employee_id: uuid.UUID, _: Reader, db: DbSession) -> Respons
 async def delete_photo(
     employee_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession
 ) -> None:
-    emp = await _get_employee(db, employee_id, lock=True)
+    emp = await _get_employee(db, ctx, employee_id, lock=True)
     if not emp.photo_key:
         raise not_found("Photo")
     old_key = emp.photo_key
@@ -501,8 +521,8 @@ async def consent_version(_: BioReader, db: DbSession) -> dict[str, str]:
     responses={404: {}},
     summary="Consent history (newest first)",
 )
-async def list_consents(employee_id: uuid.UUID, _: BioReader, db: DbSession) -> list[ConsentOut]:
-    await _get_employee(db, employee_id)
+async def list_consents(employee_id: uuid.UUID, ctx: BioReader, db: DbSession) -> list[ConsentOut]:
+    await _get_employee(db, ctx, employee_id)
     rows = (
         await db.execute(
             select(BiometricConsent)
@@ -523,7 +543,7 @@ async def list_consents(employee_id: uuid.UUID, _: BioReader, db: DbSession) -> 
 async def create_consent(
     employee_id: uuid.UUID, body: ConsentCreate, ctx: BioWriter, request: Request, db: DbSession
 ) -> ConsentOut:
-    emp = await _get_employee(db, employee_id, lock=True)
+    emp = await _get_employee(db, ctx, employee_id, lock=True)
     if emp.status == EmployeeStatus.TERMINATED:
         raise conflict("EMPLOYEE_TERMINATED", "Cannot record consent for a terminated employee.")
     if emp.attendance_method != AttendanceMethod.FACE:
@@ -595,7 +615,7 @@ async def put_consent_document(
     db: DbSession,
     file: Annotated[UploadFile, File(description="Signed form: PDF, JPEG or PNG, max 10 MB")],
 ) -> ConsentOut:
-    await _get_employee(db, employee_id)
+    await _get_employee(db, ctx, employee_id)
     c = await _get_consent(db, employee_id, consent_id)
     if c.revoked_at is not None:
         raise conflict("CONSENT_REVOKED", "Consent has been revoked.")
@@ -647,6 +667,7 @@ async def get_consent_document(
     request: Request,
     db: DbSession,
 ) -> Response:
+    await _get_employee(db, ctx, employee_id)
     c = (
         await db.execute(
             select(BiometricConsent).where(
@@ -695,7 +716,7 @@ async def revoke_consent(
     request: Request,
     db: DbSession,
 ) -> ConsentOut:
-    await _get_employee(db, employee_id)
+    await _get_employee(db, ctx, employee_id)
     c = await _get_consent(db, employee_id, consent_id)
     if c.revoked_at is not None:
         raise conflict("CONSENT_REVOKED", "Consent is already revoked.")

@@ -37,6 +37,7 @@ class Purpose(StrEnum):
     SNAPSHOT = "snapshot"
     PROFILE_PHOTO = "profile-photo"
     CONSENT_DOCUMENT = "consent-document"
+    BACKUP = "backup-archive"
 
 
 class DecryptionError(Exception):

@@ -7,7 +7,7 @@ import { useAuth } from "@/lib/auth";
 import { errorMessage, fieldErrors } from "@/lib/errors";
 import { formatDate, formatTime } from "@/lib/format";
 import { ROLE } from "@/lib/labels";
-import type { Page, Role, UserAdmin } from "@/lib/types";
+import type { Branch, Page, Role, UserAdmin } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { USERNAME_RE, passwordProblems } from "@/lib/validation";
 import { Alert } from "@/components/ui/alert";
@@ -51,6 +51,7 @@ function Users() {
   if (role) params.set("role", role);
   if (active) params.set("is_active", active);
   const list = useApiQuery<Page<UserAdmin>>(`/users?${params}`);
+  const branches = useApiQuery<Branch[]>("/branches");
   const onSearch = useCallback((v: string) => {
     setQ(v);
     setPage(1);
@@ -116,6 +117,17 @@ function Users() {
             },
             { key: "role", header: "Rol", cell: (u) => <Badge tone={ROLE[u.role].tone}>{ROLE[u.role].label}</Badge> },
             {
+              key: "branch",
+              header: "Filial",
+              hideOnMobile: true,
+              cell: (u) =>
+                u.role === "SUPER_ADMIN" ? (
+                  <span className="text-muted">Barcha filiallar</span>
+                ) : (
+                  (branches.data?.find((b) => b.id === u.branch_id)?.name ?? "…")
+                ),
+            },
+            {
               key: "state",
               header: "Holat",
               cell: (u) =>
@@ -178,6 +190,9 @@ function Users() {
 
 function UserForm({ user, onClose, onSaved }: { user?: UserAdmin; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
+  const { branchId: shown, homeBranch } = useAuth();
+  const branches = useApiQuery<Branch[]>("/branches");
+  const [branch, setBranch] = useState(user?.branch_id ?? shown ?? homeBranch?.id ?? "");
   const [username, setUsername] = useState(user?.username ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [role, setRole] = useState<Role>(user?.role ?? "VIEWER");
@@ -210,11 +225,12 @@ function UserForm({ user, onClose, onSaved }: { user?: UserAdmin; onClose: () =>
         if (isActive !== user.is_active) body.is_active = isActive;
         if ((email.trim() || null) !== user.email) body.email = email.trim() || null;
         if (locale !== user.locale) body.locale = locale;
+        if (branch && branch !== user.branch_id) body.branch_id = branch;
         if (Object.keys(body).length) await api.request(`/users/${user.id}`, { method: "PATCH", json: body });
       } else {
         await api.request("/users", {
           method: "POST",
-          json: { username: username.trim(), password, role, email: email.trim() || null, locale },
+          json: { username: username.trim(), password, role, email: email.trim() || null, locale, branch_id: branch || null },
         });
       }
       toast.success(user ? "Saqlandi" : "Foydalanuvchi yaratildi");
@@ -254,6 +270,17 @@ function UserForm({ user, onClose, onSaved }: { user?: UserAdmin; onClose: () =>
             {Object.entries(ROLE).map(([k, r]) => <option key={k} value={k}>{r.label}</option>)}
           </Select>
         </Field>
+        {role !== "SUPER_ADMIN" && (branches.data?.length ?? 0) > 1 ? (
+          <Field label="Filial" required error={errors.branch_id} hint="Administrator va kuzatuvchi faqat shu filialning maʼlumotlarini koʻradi.">
+            <Select value={branch} onChange={(e) => setBranch(e.target.value)}>
+              {(branches.data ?? []).map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        ) : null}
         <Field label="Email" error={errors.email}>
           <Input type="email" value={email} maxLength={320} onChange={(e) => setEmail(e.target.value)} />
         </Field>

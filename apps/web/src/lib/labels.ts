@@ -57,6 +57,7 @@ export const IGNORE_REASON: Record<string, string> = {
   EMPLOYEE_INACTIVE: "Xodim faol emas",
   NOT_BIOMETRIC: "Xodim qoʻlda davomatda",
   OUTSIDE_EMPLOYMENT: "Ish davridan tashqari",
+  OTHER_DEPARTMENT: "Boshqa boʻlim (bu kamera unga xizmat qilmaydi)",
 };
 
 export const DECISION: Record<string, Label> = {

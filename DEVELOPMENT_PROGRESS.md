@@ -7,8 +7,8 @@
 
 | Item | Value |
 |------|-------|
-| Current phase | **Phase 11 — Face enrolment and live recognition view** (owner: "boshlash") |
-| Phase state | ✅ Implemented and tested (310 API + 29 camera + 61 recognition + 60 web tests, live wiring check), ⏳ **awaiting owner approval and a real-face test by the owner** |
+| Current phase | **Phase 12 — Recognition → attendance (behind a master switch, OFF)** |
+| Phase state | ✅ Implemented and tested (319 API + 31 camera + 61 recognition + 61 web tests). Phase 11 verified by the owner (laptop camera: recognised 56×, similarity 0.74–0.88). ⏳ Owner tests with several colleagues, then switches attendance on. |
 | Next phase | Defined by the owner's next instruction (blocked until approval). Attendance integration stays blocked until the Phase 9 evaluation report is accepted. |
 | Last updated | 2026-11-08 |
 
@@ -416,6 +416,163 @@ Phase 8 was approved by the owner's Phase 9 instruction. The code is in `apps/re
 - `/internal/v1/templates:extract` and `/search` (API_CONTRACTS §4.2) are not implemented. Enrolment from the Core API comes in a later phase. The evaluation uses an encrypted local gallery file.
 - Docker: a Dockerfile and an opt-in compose profile `recognition` are written but **not verified**, because Docker is not installed on this machine.
 
+## Phase 23 — Attendance menu inside the Telegram bot (owner: "telegramning oʻzida boʻlsin")
+
+| Item | Status |
+|---|---|
+| Access | ✅ only linked, active administrator chats; checked again on every button press. Centre chat: every branch; branch chat: its branch only (forged buttons for other branches → refused). Employee-only chats → "menu is for administrators"; strangers → the usual "use the link" text |
+| Menu | ✅ `/menu` (also `/start` of a linked chat, "menyu"), `/bugun`, a typed date (`19.11.2026` / `19.11`). Centre: today's ranking, weekly / monthly ranking (current period "hozirgacha"), branch list → any branch's day / week / month, date picker (last 7 days or typed date). Every view has ◀️ / ▶️ navigation (no future), Menyu / Filiallar buttons; button presses edit the same message |
+| Code | ✅ `app/services/bot_menu.py`; Telegram client: inline keyboards, `editMessageText`, `answerCallbackQuery`, `setMyCommands`; updates include `callback_query`; the worker long-polls all the time (25 s) |
+| Tests | ✅ API 384 (+3: strangers / employee chats refused, centre rankings + branch drill-down + week / month + typed date, branch chat isolation incl. forged buttons); web 77 |
+
+## Phase 22 — Director's report on Telegram (owner: "barcha filiallarda davomat reyting sifatida")
+
+| Item | Status |
+|---|---|
+| What | ✅ new Telegram kind `director` (centre chats only, branch chats → 422 `centre_only`): every day at `notify.daily_summary_time` branches ranked by attendance (🥇🥈🥉, 🟢 ≥95% / 🟡 ≥80% / 🔴), totals, and the names of those not here yet per branch (worst branch first); Mondays also last week's ranking, the 1st also last month's, each with the 10 people absent / late most often |
+| Rule | ✅ rate = came / scheduled working days of ACTIVE employees of open branches (weekends, unscheduled days, leave excluded); ties → fewer late arrivals. Code: `app/services/director.py`; sent once per (kind, key) like every message |
+| API | ✅ `GET /notifications/telegram/director-preview?period=day|week|month` (`branches:manage`), not sent |
+| Web | ✅ "Direktor hisoboti" checkbox on centre chats, preview button |
+| Tests | ✅ API 381 (+3: daily ranking / names / once a day / branch chat excluded, Monday weekly with top lists, centre-only + preview rights); web 77 |
+
+## Phase 21 — Branches (filials) (owner: "boshqa tumanlarga ham beriladigan qilamiz")
+
+| Item | Status |
+|---|---|
+| Decision | ✅ owner: one central system now ("hozircha faqat sahifalar"); cameras stay on this computer. A branch admin manages its own employees, departments, schedules, Telegram, attendance and reports; the super admin (centre) sees and controls every branch |
+| Data | ✅ migration 0011: `branches` table; `branch_id` on departments, work_schedules, employees, users, cameras (default = the main branch "Markaz", fixed id `…0001`, so every existing row moved there and nothing was lost); `telegram_recipients.branch_id` (NULL = centre). Employee codes, department codes / sibling names and schedule names are unique per branch. Downgrade refuses while other branches or OTHER_BRANCH events exist |
+| Scope rule | ✅ `AuthContext.branch_id`: a branch user = own branch (from the DB on every request); SUPER_ADMIN = every branch or the one sent in `X-Branch-Id`. Other branches' rows return **404** (never 403). Body references (department, schedule, camera, employee) must be in the same branch (422). An employee's branch = its department's branch |
+| Permissions | ✅ new `branches:manage` (SUPER_ADMIN): branches CRUD, overview, system status; new `notifications:read/write` (ADMIN): link / change the branch's Telegram chats. Bot master switch and times stay `settings:write` |
+| Attendance | ✅ a camera counts only its branch's employees; others are identified but stored with `ignore_reason = OTHER_BRANCH`. Review queue is scoped by the camera's branch. A closed branch's users cannot sign in (`BRANCH_INACTIVE`) |
+| Telegram | ✅ late / camera messages go to the centre + that branch's chats; with several branches the daily message is per branch (detailed) and the centre gets a one-line-per-branch overview; review counts per branch. The send log is visible to the centre only |
+| Web | ✅ topbar branch switcher (super admin; remembered per browser, remounts the page) or own-branch badge; "Filiallar" page (open / rename / close / reopen / delete-if-empty, today's per-branch table); dashboard overview; users page branch column + select; camera form branch select (departments filtered); departments grouped by branch in selects; schedule select filtered by the employee's branch; Telegram shows which branch a chat belongs to |
+| Tests | ✅ API: +9 `test_branches.py` (isolation, 404s, cross-branch references, per-branch codes, header switching, management rights, closing locks out, OTHER_BRANCH, users / cameras scope, overview) + per-branch daily Telegram test; updated system / notification permission tests. Web 77 |
+| Owner steps | `npm run stop` → `npm run db:migrate` → `npm start`; then Filiallar → open a branch → Administratorlar → create its admin with that branch |
+
+## Phase 20 — One review card per person (owner chose "2")
+
+| Item | Status |
+|---|---|
+| Problem | ✅ a stranger standing at the door produced one card per minute (46 dismissed cards in the dev DB), and other people in the same minute got none |
+| Recognition | ✅ `recognition/visitors.py`: UNKNOWN / AMBIGUOUS faces get an anonymous `visitor_id` ("v17"); same person (cosine ≥ max(threshold, 0.40), running mean follows pose/light) keeps it; forgotten 30 min after last seen; ≤500 in memory. Embeddings never leave the recognition process |
+| Camera service | ✅ one review card per visitor id (no per-minute wait, every new person gets a card); a failed send is retried after 60 s; falls back to the old per-minute rule without a visitor id |
+| Tests | ✅ recognition 63 (+2: same face keeps id under noise, TTL and size bound); camera 42 (+1: two alternating strangers → exactly two cards) |
+
+## Phase 19 — Cameras serve departments (owner chose "2-yoʻl")
+
+| Item | Status |
+|---|---|
+| Rule | ✅ `cameras.department_ids` (migration 0010, UUID[] default empty = everyone). Faces are still matched against EVERY employee (an outsider is identified as themselves, never mistaken for a member); a recognised employee whose department is not served (sub-departments included) is stored with `ignore_reason = OTHER_DEPARTMENT` and does not count |
+| Why not a smaller gallery | ✅ measured: matching 5 vs 5000 templates = 0.005 vs 0.19 ms, while the face embedding takes 80–130 ms, so a per-camera gallery saves no time and would raise false matches for visitors from other departments |
+| API | ✅ `department_ids` on camera create / update / out; unknown or deleted departments → 422; changing them does not bump `config_version` (no camera reconnect); audited |
+| Web | ✅ camera form "Boʻlimlar" (tree checkboxes, empty = all), "Boʻlimlar" column, "Boshqa boʻlim" reason in the recognition log and live view |
+| Tests | ✅ API 367 (+3: served / sub-department counted, other department identified but not counted, no departments = everyone, API validation and no reconnect); web 77 (+1) |
+
+## Phase 18 — Automatic camera health (owner: "do not make me check every new camera")
+
+| Item | Status |
+|---|---|
+| Measurements | ✅ camera worker: codec (FFmpeg FOURCC → H.264/H.265/MJPEG), CPU of the worker thread (`time.thread_time`, % of one core, every 5 s), read failures in the last 5 min, reconnects in the last hour (windows survive reconnects) |
+| Verdict | ✅ `camera/health.py` (pure): bad = offline; warn = ≥3 reconnects/h, ≥10 lost frames/5 min, <5 fps, ≥70% CPU, H.265 or >1080p while CPU ≥40%; tip = H.265 / >1080p on a light load, >20 fps, RTSP narrower than 1280 px. Rates judged after 30 s of uptime |
+| Transport | ✅ status reports carry `codec, cpu_percent, failures_5m, reconnects_1h, health{verdict, issues[{code, severity, …numbers}]}` (API schema extended) |
+| Web | ✅ Cameras list: "Salomatlik" badge (Yaxshi / Diqqat / Ishlamayapti) with the reasons as tooltip; camera dialog: codec, CPU, "Avtomatik tekshiruv" list with plain advice per finding |
+| Telegram | ✅ "system" subscribers get one message per camera per day while the verdict is "warn" (warnings only, no tips) |
+| Real case | ✅ camera 103 (DS-2CD2443G0-I): 2560×1440 H.265 21 fps over Wi-Fi → 157 read failures; after 1920×1080 H.264 15 fps, bitrate 2048, I-frame 30: 0 failures / 30 s, worker ~27% of one core |
+| Tests | ✅ camera 41 (+7 health rules, worker report); API 364 (+1 status schema, +1 daily health alert); web 76 (+3 advice texts) |
+
+## Phase 17 — Telegram notifications (owner request)
+
+| Item | Status |
+|---|---|
+| Bot | ✅ `TELEGRAM_BOT_TOKEN` in apps/api/.env only (never in DB, UI or logs: Bot API URLs are redacted by the log formatter); `app/services/telegram.py` (sendMessage, getUpdates, getMe) |
+| Linking | ✅ Settings → "Qoʻshish" creates a one-time code (15 min) and a `t.me/<bot>?start=<code>` link; the worker long-polls getUpdates while a code waits, links the chat (person or group) and confirms in Telegram; an unknown `/start` gets a neutral reply |
+| Messages | ✅ daily summary at `notify.daily_summary_time` (came, late with time and minutes, not here yet, on leave; skipped on days off); late arrival right away (arrivals of the last 30 min only); review reminder (new pending faces, at most every `notify.review_interval_minutes`); camera without frames for `notify.camera_offline_minutes` plus recovery, one per outage; backup older than 36 h (daily). Names and times only, no photos |
+| Employee chats | ✅ (migration 0009: `telegram_recipients.employee_id`, unique, cascade) employee page → "Telegram ulash" one-time link; the employee presses Start and receives ONLY their own messages: `self_punch` ("ishga kelishingiz qayd etildi: 08:55" + lateness on a late first arrival; "ishdan ketishingiz qayd etildi") and `self_late`; recent punches only (30 min), once per event; one chat per employee (a new link moves it); an administrator who is also an employee keeps both roles; `GET/POST link/PATCH/DELETE /api/v1/employees/{id}/telegram` (employees:read / employees:write); checks every 15 s |
+| Send once | ✅ `notification_log` (kind, key) unique; the row is inserted before sending, so restarts never repeat a message; blocked chats are deactivated |
+| Switch | ✅ `notify.telegram_enabled` seeded OFF (migration 0008); settings whitelist: enabled, daily time (HH:MM), review interval (5–1440), camera minutes (1–1440) |
+| Worker | ✅ runs inside the API process when a token is set (not in tests): checks every 30 s, update polling |
+| API | ✅ `/api/v1/notifications/telegram` (status, link, recipients, test, daily-preview); read = settings:read, change = settings:write; audited |
+| Web | ✅ Settings → "Telegram bildirishnomalari": setup steps without a token, on/off, times, recipients with per-kind checkboxes, link modal that waits for Start, test message, today's summary preview, recent sends |
+| Tests | ✅ API 359 (+12: disabled, daily once / after the time / day off, late once / 30-min window, review throttling, camera outage and recovery once, blocked chat, link codes, API, permissions, settings validation, token redaction); web 73 |
+
+## Phase 16b — Guided face scan and attendance avatars (owner requests)
+
+| Item | Status |
+|---|---|
+| Guided enrolment | ✅ "Kamera bilan skanerlash" opens a modal: live preview (~5 fps, mirrored), face box (amber → green), 4 steps: straight → turn one side → the other side → straight + smile; capture after ~1 s of a correct pose; server re-checks the pose on the enrolled frame (`POSE_MISMATCH`); closes itself when done; optional "replace old templates" (limit 5) |
+| API | ✅ `POST /employees/{id}/face-templates/scan-frame` (preview + face box + yaw, nothing stored, throttled audit); `from-camera` takes `pose` / `yaw_sign` and returns `yaw_deg` |
+| Recognition | ✅ `templates/extract` returns `yaw_deg` / `roll_deg`; tests no longer pick up `CORE_API_URL` from the local .env (was 1 flaky failure) |
+| Smooth preview | ✅ camera service `POST /internal/v1/stream` (MJPEG of the monitored worker's latest frames, ≤25 fps, ≤1280 px, ≤600 s, max 4 open, 409 NOT_LIVE when not monitored); API `GET /employees/{id}/face-templates/scan-stream?camera_id` relays it (15 fps, 640 px, 120 s, audited, DB session closed before streaming); the modal reads it with fetch (token in header), draws on a canvas, reconnects every 2 min, and analyses the face ~4×/s paced by video frames (no timers). Falls back to single frames after 3 failed connections |
+| Attendance avatars | ✅ `DayOut.employee` has `has_photo` / `photo_updated_at`; Attendance and History tables show the profile photo (initials when none) |
+| Speed fix | ✅ every outgoing httpx client built a new TLS context (~250 ms on Windows) on every call; `app/core/http.py` caches one (verification unchanged). Scan preview frame: ~550 ms → ~40 ms; also speeds up the live view, camera tests and system status |
+| Tests | ✅ API 345 (+7 guided enrolment, +1 board photo flag); recognition 61; web 70 (+5 scan logic) |
+
+## Phase 16 — One-command start, autostart and system status (owner chose "2")
+
+| Item | Status |
+|---|---|
+| `npm start` (`tools/run.mjs`) | ✅ supervisor: API first (waits for /health), then recognition, camera, web (`next start -H 127.0.0.1`); production web build rebuilt automatically when sources are newer than `.next/BUILD_ID`; `--dev` (reload), `--only a,b`, `--quiet` |
+| Self-healing | ✅ restart on exit with backoff 2 s → 60 s (reset after 2 min of uptime); restart when the health check fails for 1 minute (hung process); process trees killed with `taskkill /T` |
+| Safety | ✅ single instance (`logs/supervisor.pid`), refuses busy ports with a clear message, services bound to 127.0.0.1, missing optional services skipped |
+| Logs | ✅ `logs/<service>.log` + `supervisor.log`, rotated at 10 MB; `logs/` git-ignored |
+| `npm run stop` / `status` | ✅ graceful stop through `logs/stop.request` (force after 15 s); status table from `logs/supervisor.json` |
+| `npm run autostart` | ✅ Task Scheduler task `AttendanceSystem`: at logon + 20 s, hidden window, no time limit, ignore second instance, 3 retries; `autostart:remove` |
+| `GET /api/v1/system/status` | ✅ api, database (migration), recognition, camera, last backup (warning > 36 h), free disk (warning < 5 GB), supervisor processes; `settings:read` |
+| Web | ✅ "Tizim holati" page (`/system`) in the System menu, 10 s refresh |
+| Tests | ✅ API 3 (all checks, backup + supervisor state, stale state, no secrets, permissions); web 3 (helpers). Manual: started api+camera under the supervisor, killed the camera process → restarted in 4 s, status endpoint showed every part ok, `npm run stop` left no process on the ports; busy-port refusal verified |
+
+## Phase 15 — Review queue for uncertain recognitions (owner chose "3")
+
+| Item | Status |
+|---|---|
+| Capture | ✅ camera service sends AMBIGUOUS faces (UNKNOWN only if `recognition.store_unknown_snapshots`) as a **face crop** (40 % margin, ≥128 px, never the full frame), at most one per camera+decision per minute, to `POST /internal/v1/recognition-reviews` (camera token) |
+| Gates | ✅ attendance master switch on, `recognition.review_enabled` (new, migration 0007, default on), camera enabled + recognition + quality PASSED, clock checks, idempotent `event_uid` |
+| Storage | ✅ crop re-encoded (EXIF dropped), stored AES-256-GCM (purpose `snapshot`); event stored as `AMBIGUOUS`/`UNKNOWN`, `UNMATCHED`, `review_status = PENDING`. **No suggestion of who it might be** is stored or shown (Phase 9 rule) |
+| Decide | ✅ `assign {employee_id, direction?}` → MANUAL punch via the corrections flow (sequence rules apply; BOTH/NONE cameras need a direction); `dismiss`; crop deleted immediately; audited `REVIEW_ASSIGNED` / `REVIEW_DISMISSED` / `REVIEW_SNAPSHOT_VIEWED`. The face is never enrolled from a review |
+| Expiry | ✅ pending reviews older than `retention.unknown_snapshot_days` (7) are closed and their crops deleted |
+| Permissions | ✅ view `biometrics:read`; decide `biometrics:read` + `attendance:write` (ADMIN, SUPER_ADMIN) |
+| Web | ✅ "AI tanish" → "Koʻrib chiqish" (photo, time, camera, employee picker, direction if needed, Tasdiqlash / Rad etish, 15 s refresh); Settings → two toggles; live view shows "Koʻrib chiqishga yuborildi" |
+| Tests | ✅ API 6 (gates, encrypted crop, audit, assign → manual punch + crop deleted + 409 on repeat + 410 snapshot, BOTH needs direction, dismiss, expiry + clock checks, permissions); camera 2 (crop size, review once per minute, never reported as attendance) |
+
+## Phase 14 — Reports: Excel & PDF (owner chose "2")
+
+| Item | Status |
+|---|---|
+| `GET /api/v1/reports/timesheet?month=YYYY-MM` | ✅ employee × day grid (+ K C Y D J ·), totals: work days, came, late days, absent, worked h:mm, late / early minutes; Excel has a second "Kunlar" sheet with every day (arrival, departure, worked) |
+| `GET /api/v1/reports/lateness?date_from&date_to` | ✅ date, employee, department, scheduled start, arrival, minutes late; totals |
+| `GET /api/v1/reports/absence?date_from&date_to` | ✅ absent working days with the schedule |
+| Formats | ✅ `format=json` (preview), `xlsx` (openpyxl 3.1.5, MIT; coloured cells, frozen header), `pdf` (reportlab 5.1.0, BSD; A4 landscape, TTF font with Uzbek letters, Helvetica fallback) |
+| Rules | ✅ numbers from the attendance engine (same as Attendance pages, manual corrections included); `reports:read` (all roles); range ≤ 92 days; downloads audited `REPORT_EXPORTED` |
+| Web | ✅ Reports page rebuilt: tabs, filters (month / range, department), preview table with coloured day codes, Excel / PDF download (replaces the client-side CSV) |
+| Tests | ✅ API 5 (JSON values, Excel sheets and cells, PDF, audit, lateness/absence, validation, permissions, Uzbek letters in PDF); web +1. Real dev-DB timesheet rendered and checked visually. |
+
+## Phase 13 — Encrypted backup & restore (owner: "most important first")
+
+| Item | Status |
+|---|---|
+| `npm run backup` | ✅ pg_dump (custom format) + `storage/` + manifest (SHA-256, row counts, schema version) → tar.gz → AES-256-GCM (keyring, purpose `backup-archive`, header bound as AAD) → `backups/attendance-YYYYmmdd-HHMMSS.attbak`; keeps newest 14 |
+| `npm run backup:verify` | ✅ decrypt, check every checksum, `pg_restore --list` |
+| `npm run backup:restore` | ✅ into an existing (empty) database; refuses the live DB / non-empty storage without `--force` |
+| `npm run backup:keys` | ✅ encryption + JWT keys in a scrypt+AES-GCM passphrase file; `--out` required (keep away from backups); `--show` for recovery |
+| `npm run backup:schedule` | ✅ Windows Task Scheduler daily task (not registered automatically) |
+| Tests | ✅ 5: tamper & header-change detection, wrong keys, key export passphrase, pruning, real pg_dump → verify → pg_restore into a second DB (row counts + storage files equal) |
+| Live | ✅ first real backup of the dev DB: 138 KB, 14 tables, 85 rows, 4 files, verified |
+
+## Phase 12 checklist — Recognition → attendance
+
+The owner asked to continue with attendance integration. To respect D22 (no attendance before the evaluation), everything is built behind a **master switch `recognition.attendance_enabled`, seeded OFF (migration 0006)**; the owner turns it on in Settings after testing with colleagues.
+
+| Item | Status |
+|---|---|
+| Camera service reports confident matches | ✅ only `MATCHED`, at most once per employee per camera per 5 min (was 30 s: a person sitting in view created a DEBOUNCED row every 30 s), to `POST /internal/v1/recognition-events` (camera token); outcome shown in the live view (IN / OUT / ignore reason / switch off) |
+| Core API gate | ✅ switch off → nothing stored; camera must be enabled + recognition enabled + quality PASSED; only MATCHED accepted (422 otherwise) |
+| Attendance rules | ✅ reuses the Phase 6 engine: idempotent `event_uid`, clock checks, debounce, IN/OUT/BOTH sequence, inactive / manual-method employees not counted |
+| Settings write API | ✅ `PATCH /api/v1/settings/{key}` (settings:write = SUPER_ADMIN), whitelist: `recognition.attendance_enabled`, `attendance.debounce_seconds` (10–3600), `attendance.min_presence_minutes` (0–720); audited |
+| Web | ✅ Settings: switch card with confirmation; AI tanish: "Davomat" column |
+| Not yet | review queue for AMBIGUOUS/UNKNOWN (needs encrypted face crops + retention), liveness (D4) |
+
+Verification: API 319 passed (+9: switch off records nothing, on → IN then DEBOUNCED, idempotent replay, camera gates ×3, AMBIGUOUS refused, future time refused, manual-method not counted, settings toggle audited / validation / non-writable key 404 / ADMIN 403). Camera 31 (+2: one report per cooldown, outcome stored). Web 61. Dev DB migrated to 0006 (switch false).
+
 ## Phase 11 checklist — Face enrolment and live recognition (no attendance)
 
 Scope agreed with the owner: (1) enrol employee faces, (2) show live recognition. **Attendance integration is NOT part of it** (D22).
@@ -529,6 +686,7 @@ Phase 9 was approved by the owner's Phase 10 instruction. Code: `apps/camera/` (
 | 2026-11-08 | D22 | Recognition service stays disconnected from attendance until the evaluation report is accepted | Owner rule |
 | 2026-11-08 | D23 | Separate camera service (`apps/camera`) with replaceable providers RTSP / USB / TEST; config pulled from the Core API, status pushed back (HTTP, internal network, shared token). Valkey heartbeats deferred. | Implementation |
 | 2026-11-08 | D24 | Recognition on a camera requires a PASSED stream quality test; changing the stream resets it | Implementation (owner rule) |
+| 2026-11-10 | D28 | Recognition→attendance built but gated by `recognition.attendance_enabled` (default OFF); owner enables after testing with colleagues | Owner request + D22 |
 | 2026-11-10 | D26 | Enrolment images are NOT stored (D3 resolved for now: delete after extraction). Re-enrolment needed on a model change. | Implementation (owner may revisit) |
 | 2026-11-10 | D27 | Live recognition observations are in memory only (no recognition-event table yet); they never create attendance events | Implementation (D22) |
 | 2026-11-08 | D25 | No video recording at all in v1; snapshots on demand only, not stored, audited, SUPER_ADMIN only | Implementation (owner rule) |

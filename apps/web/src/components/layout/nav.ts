@@ -1,4 +1,5 @@
 import {
+  Building,
   Building2,
   Camera,
   CalendarCheck,
@@ -9,6 +10,7 @@ import {
   LayoutDashboard,
   Palette,
   Settings,
+  Activity,
   UserCog,
   Users,
   type LucideIcon,
@@ -55,8 +57,10 @@ export const NAV: NavSection[] = [
   {
     title: t.nav.sectionSystem,
     items: [
+      { href: "/branches", label: t.nav.branches, icon: Building, permission: "branches:manage" },
       { href: "/users", label: t.nav.users, icon: UserCog, permission: "users:read" },
       { href: "/settings", label: t.nav.settings, icon: Settings, permission: "settings:read" },
+      { href: "/system", label: t.nav.system, icon: Activity, permission: "branches:manage" },
       { href: "/design-system", label: t.nav.designSystem, icon: Palette, devOnly: true },
     ],
   },

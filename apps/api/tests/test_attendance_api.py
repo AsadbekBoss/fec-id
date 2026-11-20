@@ -435,6 +435,9 @@ async def test_board(api: httpx.AsyncClient, setup: dict, session: AsyncSession)
         and b["totals"]["INCOMPLETE"] == 1
     )
     assert b["totals"]["EMPLOYEES"] == 3
+    # Profile photo flag for the avatar (no photos uploaded here).
+    assert all(d["employee"]["has_photo"] is False for d in b["items"])
+    assert all(d["employee"]["photo_updated_at"] is None for d in b["items"])
 
 
 async def test_recompute_persists_snapshots(

@@ -10,6 +10,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy import func, select
 
+from app.api import scope
 from app.api.deps import DbSession
 from app.api.errors import AppError, not_found, validation_error
 from app.attendance import engine
@@ -18,7 +19,7 @@ from app.auth.client_ip import client_ip
 from app.auth.dependencies import AuthContext, require
 from app.auth.permissions import Permission
 from app.db import audit
-from app.models import AttendanceEvent, Employee
+from app.models import AttendanceEvent, Camera, Employee
 from app.models.enums import ActorType, EventSource
 from app.schemas.attendance import (
     BoardOut,
@@ -58,6 +59,8 @@ def day_out(emp: Employee, r: engine.DayResult) -> DayOut:
             employee_code=emp.employee_code,
             full_name=_full_name(emp),
             department_id=emp.department_id,
+            has_photo=emp.photo_key is not None,
+            photo_updated_at=emp.photo_updated_at,
         ),
         work_date=r.work_date,
         status=r.status.value,
@@ -87,11 +90,12 @@ def _check_range(date_from: date, date_to: date) -> None:
 
 async def _employees(
     db: DbSession,
+    ctx: AuthContext,
     employee_id: uuid.UUID | None,
     department_id: uuid.UUID | None,
     include_subdepartments: bool = True,
 ) -> list[Employee]:
-    stmt = select(Employee).where(Employee.deleted_at.is_(None))
+    stmt = select(Employee).where(Employee.deleted_at.is_(None), ctx.scope(Employee.branch_id))
     if employee_id is not None:
         stmt = stmt.where(Employee.id == employee_id)
     if department_id is not None:
@@ -125,6 +129,14 @@ def _ev(e: AttendanceEvent) -> EventOut:
 async def ingest_event(
     body: CameraEventIn, ctx: Writer, response: Response, db: DbSession
 ) -> IngestOut:
+    if ctx.branch_id is not None:
+        cam = await db.get(Camera, body.camera_id)
+        if cam is not None and cam.branch_id != ctx.branch_id:
+            raise validation_error("camera_id", "not_found", "Camera not found.")
+        if body.employee_id is not None:
+            emp_ = await db.get(Employee, body.employee_id)
+            if emp_ is not None and emp_.branch_id != ctx.branch_id:
+                raise validation_error("employee_id", "not_found", "Employee not found.")
     try:
         result = await att.ingest_camera_event(db, **body.model_dump())
     except att.EventRejected as e:
@@ -142,7 +154,7 @@ async def ingest_event(
 
 @router.get("/events", response_model=Page[EventOut], summary="Attendance event history")
 async def list_events(
-    _: Reader,
+    ctx: Reader,
     db: DbSession,
     employee_id: uuid.UUID | None = None,
     department_id: uuid.UUID | None = None,
@@ -155,7 +167,7 @@ async def list_events(
     page: Annotated[int, Query(ge=1, le=100_000)] = 1,
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> Page[EventOut]:
-    conds: list[Any] = []
+    conds: list[Any] = [scope.event_scope(ctx)]
     if employee_id is not None:
         conds.append(AttendanceEvent.employee_id == employee_id)
     if department_id is not None:
@@ -204,6 +216,7 @@ async def list_events(
 async def correct(
     body: CorrectionIn, ctx: Writer, request: Request, db: DbSession
 ) -> CorrectionOut:
+    await scope.employee(db, ctx, body.employee_id)
     ops: list[att.AddOp | att.VoidOp] = [
         att.AddOp(o.direction, o.event_time, o.note) if o.op == "add" else att.VoidOp(o.event_id)
         for o in body.operations
@@ -283,7 +296,7 @@ async def correct(
     summary="Daily attendance (computed live from events and schedules)",
 )
 async def list_days(
-    _: Reader,
+    ctx: Reader,
     db: DbSession,
     date_from: date,
     date_to: date,
@@ -295,7 +308,7 @@ async def list_days(
     page_size: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> Page[DayOut]:
     _check_range(date_from, date_to)
-    emps = await _employees(db, employee_id, department_id, include_subdepartments)
+    emps = await _employees(db, ctx, employee_id, department_id, include_subdepartments)
     results = await att.compute_range(db, emps, date_from, date_to)
     if status_ is not None:
         results = [(e, r) for e, r in results if r.status is status_]
@@ -312,8 +325,8 @@ async def list_days(
     responses={404: {}},
     summary="One employee's day with all its events",
 )
-async def get_day(employee_id: uuid.UUID, work_date: date, _: Reader, db: DbSession) -> DayDetail:
-    emps = await _employees(db, employee_id, None)
+async def get_day(employee_id: uuid.UUID, work_date: date, ctx: Reader, db: DbSession) -> DayDetail:
+    emps = await _employees(db, ctx, employee_id, None)
     if not emps:
         raise not_found("Employee")
     results = await att.compute_range(db, emps, work_date, work_date)
@@ -332,7 +345,7 @@ async def get_day(employee_id: uuid.UUID, work_date: date, _: Reader, db: DbSess
 
 @router.get("/board", response_model=BoardOut, summary="Who is present / late / absent on a date")
 async def board(
-    _: Reader,
+    ctx: Reader,
     db: DbSession,
     on: Annotated[date, Query(alias="date")],
     department_id: uuid.UUID | None = None,
@@ -340,7 +353,7 @@ async def board(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> BoardOut:
-    emps = await _employees(db, None, department_id)
+    emps = await _employees(db, ctx, None, department_id)
     results = await att.compute_range(db, emps, on, on)
     totals = Counter(r.status.value for _, r in results)
     totals["IN_PROGRESS"] = sum(1 for _, r in results if r.in_progress)
@@ -367,7 +380,7 @@ async def recompute(
     body: RecomputeIn, ctx: Writer, request: Request, db: DbSession
 ) -> RecomputeOut:
     _check_range(body.date_from, body.date_to)
-    emps = await _employees(db, body.employee_id, body.department_id)
+    emps = await _employees(db, ctx, body.employee_id, body.department_id)
     results = await att.compute_range(db, emps, body.date_from, body.date_to)
     stored = pending = 0
     for emp, r in results:

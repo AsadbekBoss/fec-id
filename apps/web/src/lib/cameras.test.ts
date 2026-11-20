@@ -4,13 +4,13 @@ import type { Camera } from "@/lib/types";
 
 function camera(over: Partial<Camera> = {}): Camera {
   return {
-    id: "c1", name: "Main entrance", location: null, provider: "RTSP", vendor: "GENERIC", model: null,
+    id: "c1", branch_id: "b1", name: "Main entrance", location: null, provider: "RTSP", vendor: "GENERIC", model: null,
     host: "10.0.0.5", rtsp_port: 554, onvif_port: null, main_stream_path: "/Streams/101", sub_stream_path: null,
     device: null, has_credentials: true, stream_url_redacted: "rtsp://***@10.0.0.5:554/Streams/101",
     direction: "IN", recognition_enabled: false, is_enabled: true, status: "ACTIVE",
     monitoring: { reported_at: "2026-11-08T10:00:00Z", stale: false, runtime: null }, last_seen_at: null,
     last_error: null, quality_status: "UNTESTED", quality_tested_at: null, quality_report: null, roi: null,
-    settings: { sample_fps: 5, min_face_px: 80, transport: "tcp", test: null }, config_version: 3,
+    settings: { sample_fps: 5, min_face_px: 80, transport: "tcp", test: null }, department_ids: [], config_version: 3,
     created_at: "2026-11-08T09:00:00Z", updated_at: "2026-11-08T09:00:00Z", ...over,
   };
 }
@@ -74,5 +74,14 @@ describe("camera status view", () => {
     expect(canEnableRecognition(camera())).toBe(false);
     expect(canEnableRecognition(camera({ quality_status: "INCONCLUSIVE" }))).toBe(false);
     expect(canEnableRecognition(camera({ quality_status: "PASSED" }))).toBe(true);
+  });
+});
+
+describe("camera departments", () => {
+  it("sends departments on create and only changed ones on edit", () => {
+    expect(cameraBody(rtspForm({ department_ids: ["b", "a"] })).department_ids).toEqual(["a", "b"]);
+    const c = camera({ department_ids: ["a"] });
+    expect(cameraPatch(formFromCamera(c), c)).toEqual({});
+    expect(cameraPatch({ ...formFromCamera(c), department_ids: [] }, c)).toEqual({ department_ids: [] });
   });
 });

@@ -1,5 +1,6 @@
 "use client";
 
+import { BranchScopeNote } from "@/components/branch-note";
 import { Moon, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/lib/api";
@@ -44,6 +45,7 @@ function Schedules() {
         description="Ish vaqti, ish kunlari, tushlik va imtiyoz vaqti. Kechikish va kelmaganlik shu asosda hisoblanadi."
         actions={writable ? <Button icon={<Plus className="h-4 w-4" />} onClick={() => setEditing("new")}>Yangi jadval</Button> : null}
       />
+      <BranchScopeNote what="jadval" />
       <Card>
         <DataTable<WorkSchedule>
           caption="Ish jadvallari"

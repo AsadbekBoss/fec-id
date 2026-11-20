@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     reconnect_initial_seconds: float = Field(default=1.0, ge=0.01, le=60)
     reconnect_max_seconds: float = Field(default=60.0, ge=0.05, le=600)
     live_recognition_fps: float = Field(default=2.0, ge=0.2, le=10)  # frames/s sent to recognition
+    # Per employee + camera. A person standing in view is reported once per period, not every
+    # frame: 5 min keeps the event log small; a door passage is still caught on first sight.
+    attendance_event_cooldown_seconds: float = Field(default=300, ge=5, le=3600)
     max_concurrent_operations: int = Field(default=4, ge=1, le=32)  # probe/snapshot/quality
 
     # Snapshots are produced on demand, held only in memory and never written to disk.

@@ -16,12 +16,17 @@ until the evaluation report is accepted (DEVELOPMENT_PROGRESS D22).
 from __future__ import annotations
 
 import base64
+import io
 import struct
+import time
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
+import anyio
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 
@@ -64,16 +69,47 @@ class FaceTemplateOut(BaseModel):
     quality_score: float
     created_at: datetime
     created_by_user_id: uuid.UUID
+    # Head pose of the enrolled face (returned only, not stored); guided enrolment uses its sign.
+    yaw_deg: float | None = None
+
+
+# Guided enrolment ("look straight", "turn a little left / right"). Yaw comes from a landmark
+# heuristic in the recognition service; the quality gate there rejects |yaw| > 30.
+FRONTAL_MAX_YAW = 10.0
+TURNED_MIN_YAW = 12.0
 
 
 class FromCamera(StrictModel):
     camera_id: uuid.UUID
+    # Optional pose the face must have, checked on the frame that is actually enrolled.
+    pose: Literal["frontal", "turned"] | None = None
+    # For "turned": the required side (sign of yaw). Omitted = either side.
+    yaw_sign: Literal[-1, 1] | None = None
 
 
-async def _employee(db: DbSession, employee_id: uuid.UUID) -> Employee:
+def pose_problem(yaw: float | None, pose: str | None, sign: int | None) -> str | None:
+    """None when the yaw fits the requested pose, otherwise a short reason code."""
+    if pose is None:
+        return None
+    if yaw is None:
+        return "pose_unknown"
+    if pose == "frontal":
+        return None if abs(yaw) <= FRONTAL_MAX_YAW else "not_frontal"
+    if abs(yaw) < TURNED_MIN_YAW:
+        return "not_turned"
+    if sign is not None and (yaw > 0) != (sign > 0):
+        return "wrong_side"
+    return None
+
+
+async def _employee(db: DbSession, ctx: AuthContext, employee_id: uuid.UUID) -> Employee:
     e = (
         await db.execute(
-            select(Employee).where(Employee.id == employee_id, Employee.deleted_at.is_(None))
+            select(Employee).where(
+                Employee.id == employee_id,
+                Employee.deleted_at.is_(None),
+                ctx.scope(Employee.branch_id),
+            )
         )
     ).scalar_one_or_none()
     if e is None:
@@ -88,9 +124,9 @@ async def _employee(db: DbSession, employee_id: uuid.UUID) -> Employee:
     summary="Face templates of an employee (metadata only, never vectors)",
 )
 async def list_templates(
-    employee_id: uuid.UUID, _: BioReader, db: DbSession
+    employee_id: uuid.UUID, ctx: BioReader, db: DbSession
 ) -> list[FaceTemplateOut]:
-    await _employee(db, employee_id)
+    await _employee(db, ctx, employee_id)
     rows = (
         await db.execute(
             select(FaceEmbedding)
@@ -109,8 +145,10 @@ async def _enroll(
     image: bytes,
     rec: RecognitionServiceDep,
     source: str,
+    pose: str | None = None,
+    yaw_sign: int | None = None,
 ) -> FaceTemplateOut:
-    emp = await _employee(db, employee_id)
+    emp = await _employee(db, ctx, employee_id)
     if emp.attendance_method is not AttendanceMethod.FACE:
         raise conflict(
             "NOT_FACE_METHOD", "This employee uses manual attendance (no biometric processing)."
@@ -152,10 +190,28 @@ async def _enroll(
             FACE_REASONS.get(reason, "The face could not be used."),
             errors=[{"field": "file", "code": reason, "message": ",".join(reasons) or reason}],
         )
+    yaw = result.get("yaw_deg")
+    yaw = None if yaw is None else float(yaw)
+    problem = pose_problem(yaw, pose, yaw_sign)
+    if problem:
+        raise AppError(
+            422,
+            "POSE_MISMATCH",
+            "Head pose does not match",
+            "The head pose does not match the requested step.",
+            errors=[{"field": "pose", "code": problem, "message": f"yaw={yaw}"}],
+        )
     nearest = result.get("nearest") or None
     if nearest and nearest.get("same_person_likely") and nearest.get("employee_id") != str(emp.id):
         other = await db.get(Employee, uuid.UUID(str(nearest["employee_id"])))
-        who = f"{other.employee_code} {other.last_name} {other.first_name}" if other else "another"
+        # Never name an employee of a branch the caller cannot see.
+        who = "another"
+        if other is not None:
+            who = (
+                f"{other.employee_code} {other.last_name} {other.first_name}"
+                if ctx.sees(other.branch_id)
+                else "an employee of another branch"
+            )
         raise conflict(
             "FACE_MATCHES_OTHER_EMPLOYEE",
             f"This face is very similar to an enrolled employee ({who}). Check the identity "
@@ -194,7 +250,9 @@ async def _enroll(
             "source": [None, source],
         },
     )
-    return FaceTemplateOut.model_validate(t)
+    out = FaceTemplateOut.model_validate(t)
+    out.yaw_deg = yaw
+    return out
 
 
 @router.post(
@@ -232,16 +290,185 @@ async def enroll_from_camera(
     rec: RecognitionServiceDep,
     cams: CameraServiceDep,
 ) -> FaceTemplateOut:
-    await _employee(db, employee_id)
+    await _employee(db, ctx, employee_id)
     cam = (
         await db.execute(
-            select(Camera).where(Camera.id == body.camera_id, Camera.deleted_at.is_(None))
+            select(Camera).where(
+                Camera.id == body.camera_id,
+                Camera.deleted_at.is_(None),
+                ctx.scope(Camera.branch_id),
+            )
         )
     ).scalar_one_or_none()
     if cam is None:
         raise not_found("Camera")
     frame = await cams.snapshot(source_spec(cam))
-    return await _enroll(db, ctx, request, employee_id, frame, rec, f"camera:{cam.id}")
+    return await _enroll(
+        db, ctx, request, employee_id, frame, rec, f"camera:{cam.id}", body.pose, body.yaw_sign
+    )
+
+
+# --- guided enrolment preview ---------------------------------------------------------------
+
+PREVIEW_MAX_SIDE = 480
+PREVIEW_AUDIT_SECONDS = 300
+_preview_audited: dict[tuple[uuid.UUID, uuid.UUID], float] = {}
+
+
+STREAM_FPS = 15
+STREAM_MAX_SIDE = 640
+STREAM_SECONDS = 120  # the page reconnects; bounds an abandoned connection
+
+
+@router.get(
+    "/employees/{employee_id}/face-templates/scan-stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {"content": {"multipart/x-mixed-replace": {}}},
+        404: {},
+        409: {},
+        429: {},
+        503: {},
+    },
+    summary="Guided enrolment: smooth live preview (MJPEG, ~15 fps, nothing stored)",
+)
+async def scan_stream(
+    employee_id: uuid.UUID,
+    camera_id: uuid.UUID,
+    ctx: BioWriter,
+    request: Request,
+    db: DbSession,
+    cams: CameraServiceDep,
+) -> StreamingResponse:
+    """Relays the camera service's in-memory preview of a MONITORED camera. No identification,
+    no embeddings, no storage. Audited like scan-frame (once per user and camera every 5 min).
+    The DB session closes before streaming starts (DbSession has function scope)."""
+    await _employee(db, ctx, employee_id)
+    cam = (
+        await db.execute(
+            select(Camera).where(
+                Camera.id == camera_id, Camera.deleted_at.is_(None), ctx.scope(Camera.branch_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if cam is None:
+        raise not_found("Camera")
+    content_type, chunks = await cams.stream(
+        source_spec(cam), STREAM_FPS, STREAM_MAX_SIDE, STREAM_SECONDS
+    )
+    await _audit_preview(db, ctx, request, employee_id, cam.id)
+    return StreamingResponse(chunks, media_type=content_type, headers={"Cache-Control": "no-store"})
+
+
+async def _audit_preview(
+    db: DbSession, ctx: AuthContext, request: Request, employee_id: uuid.UUID, camera_id: uuid.UUID
+) -> None:
+    key, now = (ctx.user_id, camera_id), time.monotonic()
+    if now - _preview_audited.get(key, -1e9) < PREVIEW_AUDIT_SECONDS:
+        return
+    _preview_audited[key] = now
+    await audit.record(
+        db,
+        action="ENROLMENT_PREVIEW_VIEWED",
+        actor_type=ActorType.USER,
+        actor_user_id=ctx.user_id,
+        entity_type="employee",
+        entity_id=employee_id,
+        ip=client_ip(request),
+        changes={"camera_id": [None, str(camera_id)]},
+    )
+
+
+class ScanCamera(StrictModel):
+    camera_id: uuid.UUID
+    # False when the page shows the MJPEG stream and only needs the face box and pose.
+    preview: bool = True
+
+
+class ScanFace(BaseModel):
+    box: list[float]  # [x, y, w, h] as fractions of the frame (0..1)
+    yaw_deg: float | None
+    roll_deg: float | None
+    passed: bool
+    reasons: list[str]
+    face_width_px: float
+
+
+class ScanFrameOut(BaseModel):
+    preview: str | None  # data:image/jpeg;base64,... small preview, not stored anywhere
+    faces: int
+    face: ScanFace | None  # the largest face
+
+
+def _preview(jpeg: bytes) -> str:
+    with Image.open(io.BytesIO(jpeg)) as im:
+        img = im.convert("RGB")
+    img.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=70)  # re-encoded: no metadata
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+@router.post(
+    "/employees/{employee_id}/face-templates/scan-frame",
+    response_model=ScanFrameOut,
+    responses={404: {}, 502: {}, 503: {}},
+    summary="Guided enrolment: live preview frame with face box and head pose (nothing stored)",
+)
+async def scan_frame(
+    employee_id: uuid.UUID,
+    body: ScanCamera,
+    ctx: BioWriter,
+    request: Request,
+    db: DbSession,
+    rec: RecognitionServiceDep,
+    cams: CameraServiceDep,
+) -> ScanFrameOut:
+    """The frame is processed in memory only. No identification, no embeddings. Viewing is
+    audited once per user and camera every 5 minutes (the page polls several times a second)."""
+    await _employee(db, ctx, employee_id)
+    cam = (
+        await db.execute(
+            select(Camera).where(
+                Camera.id == body.camera_id,
+                Camera.deleted_at.is_(None),
+                ctx.scope(Camera.branch_id),
+            )
+        )
+    ).scalar_one_or_none()
+    if cam is None:
+        raise not_found("Camera")
+    frame = await cams.snapshot(source_spec(cam))
+    q = await rec.quality(frame)
+    preview = None
+    if body.preview:
+        try:
+            preview = await anyio.to_thread.run_sync(_preview, frame)
+        except (OSError, ValueError):
+            raise AppError(
+                502, "BAD_FRAME", "Bad gateway", "The camera returned an unreadable frame."
+            ) from None
+    del frame
+
+    faces = [f for f in q.get("faces") or [] if isinstance(f, dict)]
+    size = q.get("image_size") or [0, 0]
+    w, h = float(size[0] or 0), float(size[1] or 0)
+    best = max(faces, key=lambda f: float(f["box"][2]) * float(f["box"][3]), default=None)
+    face = None
+    if best is not None and w > 0 and h > 0:
+        x, y, bw, bh = (float(v) for v in best["box"])
+        qual = best.get("quality") or {}
+        face = ScanFace(
+            box=[round(x / w, 4), round(y / h, 4), round(bw / w, 4), round(bh / h, 4)],
+            yaw_deg=qual.get("yaw_deg"),
+            roll_deg=qual.get("roll_deg"),
+            passed=bool(qual.get("passed")),
+            reasons=[str(r) for r in qual.get("reasons") or []],
+            face_width_px=float(qual.get("face_width_px") or 0),
+        )
+
+    await _audit_preview(db, ctx, request, employee_id, cam.id)
+    return ScanFrameOut(preview=preview, faces=len(faces), face=face)
 
 
 @router.delete(
@@ -257,6 +484,7 @@ async def delete_template(
     request: Request,
     db: DbSession,
 ) -> None:
+    await _employee(db, ctx, employee_id)
     t = (
         await db.execute(
             select(FaceEmbedding).where(
@@ -288,14 +516,25 @@ async def delete_template(
     summary="Recent recognition observations from cameras (in memory, not stored)",
 )
 async def live(
-    _: BioReader,
+    ctx: BioReader,
     db: DbSession,
     cams: CameraServiceDep,
     since: Annotated[int, Query(ge=0)] = 0,
     camera_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     data = await cams.observations(since, str(camera_id) if camera_id else None)
-    obs: list[dict[str, Any]] = list(data.get("observations") or [])
+    names = {
+        str(c.id): c.name
+        for c in (
+            await db.execute(
+                select(Camera).where(Camera.deleted_at.is_(None), ctx.scope(Camera.branch_id))
+            )
+        ).scalars()
+    }
+    # Only cameras of the caller's branch(es).
+    obs: list[dict[str, Any]] = [
+        o for o in data.get("observations") or [] if str(o.get("camera_id")) in names
+    ]
     ids = {
         uuid.UUID(str(o["employee_id"]))
         for o in obs
@@ -314,11 +553,9 @@ async def live(
         emp_id = o.get("employee_id") if o.get("decision") == "MATCHED" else None
         o["employee"] = people.get(str(emp_id)) if emp_id else None
         o.pop("employee_id", None)
-    names = {
-        str(c.id): c.name
-        for c in (await db.execute(select(Camera).where(Camera.deleted_at.is_(None)))).scalars()
-    }
     cameras = [
-        {**c, "name": names.get(str(c.get("camera_id")), "?")} for c in data.get("cameras") or []
+        {**c, "name": names[str(c.get("camera_id"))]}
+        for c in data.get("cameras") or []
+        if str(c.get("camera_id")) in names
     ]
     return {"observations": obs, "next": data.get("next", since), "cameras": cameras}

@@ -27,7 +27,7 @@ from app.auth.permissions import Permission
 from app.core.config import get_settings
 from app.core.text import escape_like, normalize_search
 from app.db import audit
-from app.models import Camera
+from app.models import Branch, Camera, Department
 from app.models.enums import (
     ActorType,
     CameraDirection,
@@ -91,9 +91,13 @@ async def _fresh_out(db: DbSession, c: Camera) -> CameraOut:
     return to_out(c)
 
 
-async def _get(db: DbSession, camera_id: uuid.UUID) -> Camera:
+async def _get(db: DbSession, ctx: AuthContext, camera_id: uuid.UUID) -> Camera:
     c = (
-        await db.execute(select(Camera).where(Camera.id == camera_id, Camera.deleted_at.is_(None)))
+        await db.execute(
+            select(Camera).where(
+                Camera.id == camera_id, Camera.deleted_at.is_(None), ctx.scope(Camera.branch_id)
+            )
+        )
     ).scalar_one_or_none()
     if c is None:
         raise not_found("Camera")
@@ -157,7 +161,7 @@ async def _audit(
 
 @router.get("", response_model=Page[CameraOut], summary="List cameras")
 async def list_cameras(
-    _: Reader,
+    ctx: Reader,
     db: DbSession,
     q: Annotated[str | None, Query(max_length=100)] = None,
     provider: CameraProvider | None = None,
@@ -167,7 +171,7 @@ async def list_cameras(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> Page[CameraOut]:
-    stmt = select(Camera).where(Camera.deleted_at.is_(None))
+    stmt = select(Camera).where(Camera.deleted_at.is_(None), ctx.scope(Camera.branch_id))
     if q:
         term = f"%{escape_like(normalize_search(q))}%"
         stmt = stmt.where(
@@ -208,9 +212,21 @@ async def create_camera(
             "Recognition can be enabled only after a passed stream quality test.",
         )
     data = body.model_dump(
-        exclude={"username", "password", "settings", "recognition_enabled", "roi"},
+        exclude={
+            "username",
+            "password",
+            "settings",
+            "recognition_enabled",
+            "roi",
+            "department_ids",
+            "branch_id",
+        },
         exclude_none=True,
     )
+    branch = body.branch_id or ctx.write_branch
+    await _check_branch(db, ctx, branch)
+    data["branch_id"] = branch
+    data["department_ids"] = await _check_departments(db, branch, body.department_ids or [])
     c = Camera(
         **data,
         settings=(body.settings.model_dump() if body.settings else {}),
@@ -241,8 +257,8 @@ async def create_camera(
 
 
 @router.get("/{camera_id}", response_model=CameraOut, responses={404: {}}, summary="Get camera")
-async def get_camera(camera_id: uuid.UUID, _: Reader, db: DbSession) -> CameraOut:
-    return to_out(await _get(db, camera_id))
+async def get_camera(camera_id: uuid.UUID, ctx: Reader, db: DbSession) -> CameraOut:
+    return to_out(await _get(db, ctx, camera_id))
 
 
 @router.patch(
@@ -254,9 +270,10 @@ async def get_camera(camera_id: uuid.UUID, _: Reader, db: DbSession) -> CameraOu
 async def update_camera(
     camera_id: uuid.UUID, body: CameraUpdate, ctx: Writer, request: Request, db: DbSession
 ) -> CameraOut:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     changes = body.model_dump(
-        exclude_unset=True, exclude={"username", "password", "clear_credentials"}
+        exclude_unset=True,
+        exclude={"username", "password", "clear_credentials", "department_ids", "branch_id"},
     )
     if "settings" in changes and body.settings is not None:
         changes["settings"] = body.settings.model_dump()
@@ -313,15 +330,61 @@ async def update_camera(
             _require_quality(c)
         diff["recognition_enabled"] = [c.recognition_enabled, changes["recognition_enabled"]]
         c.recognition_enabled = changes["recognition_enabled"]
+    # Departments only change how the Core API counts events: no camera reconnect needed.
+    dept_diff: dict[str, list[Any]] = {}
+    branch = c.branch_id
+    if body.branch_id is not None and body.branch_id != c.branch_id:
+        await _check_branch(db, ctx, body.branch_id)
+        dept_diff["branch_id"] = [str(c.branch_id), str(body.branch_id)]
+        branch = c.branch_id = body.branch_id
+        if body.department_ids is None:
+            body.department_ids = list(c.department_ids or [])
+    if body.department_ids is not None:
+        new_depts = await _check_departments(db, branch, body.department_ids)
+        if set(new_depts) != set(c.department_ids or []):
+            dept_diff["department_ids"] = [
+                [str(d) for d in c.department_ids or []],
+                [str(d) for d in new_depts],
+            ]
+            c.department_ids = new_depts
     if diff:
         c.config_version += 1
         if c.is_enabled and stream_changed:
             c.status = CameraStatus.OFFLINE  # the camera service reconnects with the new config
             c.runtime, c.runtime_reported_at = None, None
     await _flush_or_conflict(db)
-    if diff:
-        await _audit(db, ctx, request, "CAMERA_UPDATED", c, diff)
+    if diff or dept_diff:
+        await _audit(db, ctx, request, "CAMERA_UPDATED", c, {**diff, **dept_diff})
     return await _fresh_out(db, c)
+
+
+async def _check_branch(db: DbSession, ctx: AuthContext, branch_id: uuid.UUID) -> None:
+    if not ctx.sees(branch_id) or await db.get(Branch, branch_id) is None:
+        raise validation_error("branch_id", "not_found", "Branch not found.")
+
+
+async def _check_departments(
+    db: DbSession, branch_id: uuid.UUID, ids: list[uuid.UUID]
+) -> list[uuid.UUID]:
+    """Existing, non-deleted departments of the camera's branch; duplicates removed."""
+    unique = list(dict.fromkeys(ids))
+    if not unique:
+        return []
+    found = set(
+        (
+            await db.execute(
+                select(Department.id).where(
+                    Department.id.in_(unique),
+                    Department.deleted_at.is_(None),
+                    Department.branch_id == branch_id,
+                )
+            )
+        ).scalars()
+    )
+    missing = [str(d) for d in unique if d not in found]
+    if missing:
+        raise validation_error("department_ids", "not_found", f"Unknown departments: {missing}")
+    return unique
 
 
 def _fmt(v: Any) -> Any:
@@ -337,7 +400,7 @@ def _fmt(v: Any) -> Any:
     summary="Delete (soft); the camera service stops its worker",
 )
 async def delete_camera(camera_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession) -> None:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     c.deleted_at = datetime.now(UTC)
     c.is_enabled = False
     c.status = CameraStatus.DISABLED
@@ -354,7 +417,7 @@ async def delete_camera(camera_id: uuid.UUID, ctx: Writer, request: Request, db:
 async def enable_camera(
     camera_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession
 ) -> CameraOut:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     if not c.is_enabled:
         c.is_enabled = True
         c.status = CameraStatus.OFFLINE  # until the camera service reports a frame
@@ -373,7 +436,7 @@ async def enable_camera(
 async def disable_camera(
     camera_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession
 ) -> CameraOut:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     if c.is_enabled:
         c.is_enabled = False
         c.status = CameraStatus.DISABLED
@@ -391,7 +454,7 @@ async def disable_camera(
 async def test_camera(
     camera_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession, svc: CameraServiceDep
 ) -> ProbeResult:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     result = ProbeResult.model_validate(await svc.probe(source_spec(c)))
     await _audit(
         db,
@@ -412,7 +475,7 @@ async def test_camera(
 async def camera_snapshot(
     camera_id: uuid.UUID, ctx: Writer, request: Request, db: DbSession, svc: CameraServiceDep
 ) -> Response:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     jpeg = await svc.snapshot(source_spec(c))
     await _audit(db, ctx, request, "CAMERA_SNAPSHOT_VIEWED", c)
     return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -432,7 +495,7 @@ async def quality_test(
     svc: CameraServiceDep,
     body: QualityTestRequest | None = None,
 ) -> CameraOut:
-    c = await _get(db, camera_id)
+    c = await _get(db, ctx, camera_id)
     duration = (body or QualityTestRequest()).duration_seconds
     report = await svc.quality_test(source_spec(c), duration)
     try:

@@ -1,5 +1,6 @@
 "use client";
 
+import { BranchScopeNote } from "@/components/branch-note";
 import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/lib/api";
@@ -44,6 +45,7 @@ function Departments() {
         description="Tashkilot tuzilmasi. Boʻlim jadvali uning barcha ichki boʻlimlariga ham taʼsir qiladi."
         actions={writable ? <Button icon={<Plus className="h-4 w-4" />} onClick={() => setEditing("new")}>Yangi boʻlim</Button> : null}
       />
+      <BranchScopeNote what="boʻlim (ota boʻlimsiz)" />
       <Card>
         <DataTable<DeptOption>
           caption="Boʻlimlar"
@@ -175,7 +177,7 @@ function DepartmentForm({ dept, onClose, onSaved, canSchedule }: { dept: DeptOpt
         </Field>
         {dept && canSchedule ? (
           <Field label="Standart ish jadvali" error={errors.work_schedule_id} hint="Shaxsiy jadvali yoʻq xodimlarga qoʻllanadi">
-            <ScheduleSelect value={schedule} onChange={setSchedule} emptyLabel="— (ota boʻlimdan meros)" />
+            <ScheduleSelect value={schedule} onChange={setSchedule} emptyLabel="— (ota boʻlimdan meros)" branchId={dept?.branch_id ?? null} />
           </Field>
         ) : null}
       </form>

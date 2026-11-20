@@ -26,6 +26,10 @@ export type CameraForm = {
   test_height: string;
   test_fps: string;
   test_simulate: TestSimulate;
+  /** Departments served (empty = all employees). */
+  department_ids: string[];
+  /** Branch whose employees it records ("" = the selected / main branch, decided by the server). */
+  branch_id: string;
 };
 
 export function emptyForm(): CameraForm {
@@ -34,6 +38,8 @@ export function emptyForm(): CameraForm {
     main_stream_path: "", sub_stream_path: "", transport: "tcp", device: "0", username: "", password: "",
     clear_credentials: false, sample_fps: "5", min_face_px: "80", test_source: "pattern", test_media: "",
     test_width: "1280", test_height: "720", test_fps: "15", test_simulate: "none",
+    department_ids: [],
+    branch_id: "",
   };
 }
 
@@ -43,6 +49,8 @@ export function formFromCamera(c: Camera): CameraForm {
     ...emptyForm(),
     name: c.name,
     location: c.location ?? "",
+    department_ids: c.department_ids ?? [],
+    branch_id: c.branch_id ?? "",
     provider: c.provider,
     direction: c.direction,
     host: c.host ?? "",
@@ -126,6 +134,8 @@ export function cameraBody(f: CameraForm): Record<string, unknown> {
     provider: f.provider,
     direction: f.direction,
     settings,
+    department_ids: [...f.department_ids].sort(),
+    ...(f.branch_id ? { branch_id: f.branch_id } : {}),
   };
   if (f.provider === "RTSP") {
     Object.assign(body, {

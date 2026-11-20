@@ -43,7 +43,7 @@ async def test_employee_code_unique(session: AsyncSession) -> None:
     async def dup() -> None:
         await f.employee(session, dept, employee_code="E001")
 
-    await rejects(session, dup, "uq_employees_employee_code")
+    await rejects(session, dup, "uq_employees_branch_id_employee_code")
 
 
 async def test_username_unique_case_insensitive(session: AsyncSession) -> None:

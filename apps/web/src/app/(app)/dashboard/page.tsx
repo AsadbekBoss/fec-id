@@ -1,5 +1,6 @@
 "use client";
 
+import { BranchOverviewCard } from "@/components/branch-overview";
 import { AlarmClock, CalendarCheck, Hourglass, RotateCw, UserX, Users } from "lucide-react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth";
@@ -47,7 +48,7 @@ function KpiGrid({ board, employees, loading }: { board?: Board; employees?: Emp
 }
 
 export default function DashboardPage() {
-  const { can, user } = useAuth();
+  const { can, user, branchId } = useAuth();
   const today = todayInOrg();
   const canAttendance = can("attendance:read");
   const board = useApiQuery<Board>(canAttendance ? `/attendance/board?date=${today}&page_size=500` : null);
@@ -75,6 +76,8 @@ export default function DashboardPage() {
       />
 
       {!canAttendance ? <Alert className="mb-6">{t.dashboard.noAccess}</Alert> : null}
+
+      {can("branches:manage") && !branchId ? <BranchOverviewCard /> : null}
 
       {board.error ? (
         <Card className="mb-6">

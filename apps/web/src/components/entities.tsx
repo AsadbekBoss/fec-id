@@ -5,7 +5,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { BIOMETRIC_STATUS, DAY_STATUS, EMPLOYEE_STATUS } from "@/lib/labels";
-import type { BiometricStatus, DayStatus, Department, Employee, EmployeeStatus, Page, WorkSchedule } from "@/lib/types";
+import type { BiometricStatus, Branch, DayStatus, Department, Employee, EmployeeStatus, Page, WorkSchedule } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/form";
@@ -67,6 +67,18 @@ export function useDepartments() {
   return { ...q, tree };
 }
 
+/** Departments grouped by branch (several groups only when several branches are shown). */
+function useBranchGroups(depts: DeptOption[]): { id: string; name: string; items: DeptOption[] }[] {
+  const ids = [...new Set(depts.map((d) => d.branch_id))];
+  const branches = useApiQuery<Branch[]>(ids.length > 1 ? "/branches" : null);
+  if (ids.length <= 1) return [{ id: ids[0] ?? "", name: "", items: depts }];
+  return ids.map((id) => ({
+    id,
+    name: branches.data?.find((b) => b.id === id)?.name ?? "Filial",
+    items: depts.filter((d) => d.branch_id === id),
+  }));
+}
+
 export function DepartmentSelect({
   value,
   onChange,
@@ -80,18 +92,28 @@ export function DepartmentSelect({
   exclude?: string;
 } & Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "value" | "onChange">) {
   const { tree, loading } = useDepartments();
+  const groups = useBranchGroups(tree.filter((d) => d.id !== exclude));
   return (
     <Select value={value} onChange={(e) => onChange(e.target.value)} disabled={loading || rest.disabled} {...rest}>
       <option value="">{allLabel ?? "Tanlang…"}</option>
-      {tree
-        .filter((d) => d.id !== exclude)
-        .map((d) => (
-          <option key={d.id} value={d.id}>
-            {"  ".repeat(d.depth)}
-            {d.name}
-          </option>
-        ))}
+      {groups.length === 1
+        ? groups[0].items.map((d) => deptOption(d))
+        : groups.map((g) => (
+            <optgroup key={g.id} label={g.name}>
+              {g.items.map((d) => deptOption(d))}
+            </optgroup>
+          ))}
     </Select>
+  );
+}
+
+/** One indented department option (non-breaking spaces survive inside <option>). */
+function deptOption(d: DeptOption) {
+  return (
+    <option key={d.id} value={d.id}>
+      {"  ".repeat(d.depth)}
+      {d.name}
+    </option>
   );
 }
 
@@ -99,17 +121,21 @@ export function ScheduleSelect({
   value,
   onChange,
   emptyLabel = "Jadvalsiz (boʻlim jadvali)",
+  branchId,
   ...rest
 }: {
   value: string;
   onChange: (v: string) => void;
   emptyLabel?: string;
+  /** Only schedules of this branch (a schedule must belong to the employee's branch). */
+  branchId?: string | null;
 } & Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "value" | "onChange">) {
   const { data, loading } = useApiQuery<WorkSchedule[]>("/work-schedules");
+  const list = (data ?? []).filter((s) => !branchId || s.branch_id === branchId);
   return (
     <Select value={value} onChange={(e) => onChange(e.target.value)} disabled={loading || rest.disabled} {...rest}>
       <option value="">{emptyLabel}</option>
-      {(data ?? []).map((s) => (
+      {list.map((s) => (
         <option key={s.id} value={s.id}>
           {s.name} ({s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)}){s.is_active ? "" : " · nofaol"}
         </option>
@@ -307,6 +333,25 @@ export function Initials({ name, className }: { name: string; className?: string
     <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-navy-100 text-xs font-semibold text-navy-700", className)}>
       {letters}
     </span>
+  );
+}
+
+/** Small round profile photo, or initials when the employee has none. */
+export function EmployeeAvatar({
+  employee: e,
+  className,
+}: {
+  employee: { id: string; full_name: string; has_photo?: boolean; photo_updated_at?: string | null };
+  className?: string;
+}) {
+  if (!e.has_photo) return <Initials name={e.full_name} className={className} />;
+  return (
+    <AuthImage
+      path={`/employees/${e.id}/photo`}
+      version={e.photo_updated_at}
+      alt={`${e.full_name} rasmi`}
+      className={cn("h-9 w-9 shrink-0 rounded-full", className)}
+    />
   );
 }
 

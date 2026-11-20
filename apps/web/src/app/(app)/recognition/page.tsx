@@ -8,8 +8,8 @@ import type { AttendanceEvent, Page } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { useEmployeeNames } from "@/lib/use-employee-names";
 import { useAuth } from "@/lib/auth";
-import { MissingApi } from "@/components/entities";
 import { LiveRecognition } from "@/components/live-recognition";
+import { ReviewQueue } from "@/components/review-queue";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -45,12 +45,13 @@ function Recognition() {
   return (
     <>
       <PageHeader title="AI tanish" description="Kamera oldidagi odamlarni jonli tanish va davomat hodisalari" />
-      <Alert tone="warning" className="mb-6" title="Tanish hali davomatga ulanmagan">
-        Jonli tanish faqat koʻrsatadi: davomat yozilmaydi. Aniq boʻlmagan holatlar hech qachon avtomatik shaxsga bogʻlanmaydi.
-        Davomatga ulash tanish sifati sinovi (EVALUATION_PROTOCOL.md) natijasi tasdiqlangandan keyin qilinadi.
+      <Alert tone="info" className="mb-6" title="Tanish va davomat">
+        Faqat ishonchli tanilgan xodim (“Tanildi”) davomatga yozilishi mumkin va bu Sozlamalar sahifasidagi
+        “Tanishni davomatga ulash” kaliti yoqilgandagina ishlaydi. Aniq boʻlmagan holatlar hech qachon avtomatik shaxsga bogʻlanmaydi.
       </Alert>
 
       {can("biometrics:read") ? <LiveRecognition /> : null}
+      {can("biometrics:read") ? <ReviewQueue /> : null}
 
       <Card className="mb-6">
         <CardHeader title="Tanish hodisalari jurnali" description="Hisoblanmagan hodisalar sababi bilan koʻrsatiladi" />
@@ -110,14 +111,6 @@ function Recognition() {
         {events.data && events.data.total > 0 ? <Pagination page={page} pageSize={PAGE} total={events.data.total} onPage={setPage} /> : null}
       </Card>
 
-      <MissingApi
-        title="Tanilmagan yuzlarni koʻrib chiqish (saqlangan hodisalar)"
-        phase="Davomatga ulash bosqichi"
-        contract="API_CONTRACTS §2.7"
-        endpoints={["GET /api/v1/recognition-events", "POST /api/v1/recognition-events/{id}/review"]}
-      >
-        Jonli tanish natijalari hozircha faqat xotirada turadi va saqlanmaydi. Saqlash va koʻrib chiqish davomatga ulash bilan birga qilinadi.
-      </MissingApi>
     </>
   );
 }

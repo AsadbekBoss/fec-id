@@ -3,7 +3,7 @@
 import { Radio } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatTime } from "@/lib/format";
-import { DECISION, QUALITY_REASON } from "@/lib/labels";
+import { DECISION, IGNORE_REASON, QUALITY_REASON } from "@/lib/labels";
 import type { LiveObservation, LiveResponse } from "@/lib/types";
 import { useApiQuery } from "@/lib/use-api";
 import { Alert } from "@/components/ui/alert";
@@ -16,6 +16,19 @@ import { DataTable } from "@/components/ui/table";
 
 const POLL_MS = 2000;
 const LOW_QUALITY = { label: "Sifat past", tone: "neutral" as const };
+
+/** Attendance outcome of a reported recognition. */
+export function attendanceLabel(a: string | null): { text: string; tone: "success" | "neutral" | "warning" } | null {
+  if (!a) return null;
+  if (a === "IN") return { text: "Kirish yozildi", tone: "success" };
+  if (a === "OUT") return { text: "Chiqish yozildi", tone: "success" };
+  if (a === "attendance_disabled") return { text: "Davomatga ulanmagan", tone: "neutral" };
+  if (a === "camera_not_enabled") return { text: "Kamera tanishga ruxsatsiz", tone: "warning" };
+  if (a === "error") return { text: "Yuborilmadi (xato)", tone: "warning" };
+  if (a === "review") return { text: "Koʻrib chiqishga yuborildi", tone: "warning" };
+  if (a === "review_disabled" || a === "unknown_not_stored") return { text: "Saqlanmadi (sozlama)", tone: "neutral" };
+  return { text: IGNORE_REASON[a] ?? a, tone: "neutral" };
+}
 
 const RECOGNITION_STATE: Record<string, string> = {
   active: "ishlayapti",
@@ -48,7 +61,7 @@ export function LiveRecognition() {
             <Radio className="h-4 w-4 text-danger-600" aria-hidden /> Jonli tanish
           </span>
         }
-        description="Har 2 soniyada yangilanadi. Suratlar saqlanmaydi. Davomatga yozilmaydi."
+        description="Har 2 soniyada yangilanadi. Suratlar saqlanmaydi. Davomatga yozish Sozlamalardagi kalit bilan boshqariladi."
       />
       {q.error ? <div className="p-5"><ErrorState error={q.error} onRetry={q.reload} /></div> : null}
       {q.data && cams.length === 0 ? (
@@ -114,6 +127,14 @@ export function LiveRecognition() {
               align: "right",
               hideOnMobile: true,
               cell: (o) => (o.score !== null && o.decision !== "LOW_QUALITY" ? <span className="tabular-nums">{o.score.toFixed(2)}</span> : "—"),
+            },
+            {
+              key: "att",
+              header: "Davomat",
+              cell: (o) => {
+                const l = attendanceLabel(o.attendance);
+                return l ? <Badge tone={l.tone}>{l.text}</Badge> : <span className="text-muted">—</span>;
+              },
             },
             { key: "n", header: "Marta", align: "right", hideOnMobile: true, cell: (o) => o.count },
             {

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api } from "@/lib/api";
 import { errorMessage, fieldErrors } from "@/lib/errors";
 import type { Employee } from "@/lib/types";
-import { DepartmentSelect, ScheduleSelect } from "@/components/entities";
+import { DepartmentSelect, ScheduleSelect, useDepartments } from "@/components/entities";
 import { Button } from "@/components/ui/button";
 import { Field, FormError, Input, Select } from "@/components/ui/form";
 import { Modal } from "@/components/ui/modal";
@@ -95,6 +95,9 @@ export function EmployeeFormModal({
     attendance_method: employee?.attendance_method ?? "FACE",
   };
   const [v, setV] = useState<Values>(initial);
+  const departments = useDepartments();
+  /** The employee belongs to the branch of its department; its schedule must too. */
+  const deptBranch = departments.data?.find((d) => d.id === v.department_id)?.branch_id ?? null;
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -178,7 +181,7 @@ export function EmployeeFormModal({
             <DepartmentSelect value={v.department_id} onChange={set("department_id")} />
           </Field>
           <Field label="Ish jadvali" error={errors.work_schedule_id} hint="Boʻsh boʻlsa, boʻlim jadvali qoʻllanadi">
-            <ScheduleSelect value={v.work_schedule_id} onChange={set("work_schedule_id")} />
+            <ScheduleSelect value={v.work_schedule_id} onChange={set("work_schedule_id")} branchId={deptBranch} />
           </Field>
           <Field label="Telefon" error={errors.phone}>
             <Input type="tel" value={v.phone} placeholder="+998 90 123 45 67" onChange={(e) => set("phone")(e.target.value)} />

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +26,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core import crypto
@@ -38,6 +39,7 @@ from app.models.enums import (
     CameraVendor,
     pg_enum,
 )
+from app.models.organization import branch_fk
 
 if TYPE_CHECKING:
     from app.models.attendance import AttendanceEvent
@@ -49,6 +51,13 @@ class Camera(UUIDPrimaryKey, Timestamps, SoftDelete, Base):
     __tablename__ = "cameras"
 
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Records attendance only for employees of this branch (others: OTHER_BRANCH).
+    branch_id: Mapped[uuid.UUID] = branch_fk()
+    # Departments this camera records attendance for (sub-departments included). Empty = all.
+    # Faces are always matched against EVERY employee; others are logged as OTHER_DEPARTMENT.
+    department_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=False, server_default="{}"
+    )
     location: Mapped[str | None] = mapped_column(String(200))
     provider: Mapped[CameraProvider] = mapped_column(
         pg_enum(CameraProvider, "camera_provider"),
