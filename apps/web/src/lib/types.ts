@@ -136,7 +136,7 @@ export type WorkSchedule = {
 };
 
 // --- attendance (§2.8) ---
-export type DayStatus = "PRESENT" | "LATE" | "INCOMPLETE" | "ABSENT" | "WEEKEND" | "NOT_SCHEDULED" | "PENDING";
+export type DayStatus = "PRESENT" | "LATE" | "INCOMPLETE" | "ABSENT" | "WEEKEND" | "NOT_SCHEDULED" | "PENDING" | "LEAVE" | "HOLIDAY";
 
 export type Day = {
   employee: {

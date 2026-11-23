@@ -9,6 +9,7 @@ import {
   ScanFace,
   LayoutDashboard,
   Palette,
+  Palmtree,
   Settings,
   Activity,
   UserCog,
@@ -50,6 +51,7 @@ export const NAV: NavSection[] = [
     items: [
       { href: "/departments", label: t.nav.departments, icon: Building2, permission: "employees:read" },
       { href: "/schedules", label: t.nav.schedules, icon: Clock, permission: "attendance:read" },
+      { href: "/leaves", label: t.nav.leaves, icon: Palmtree, permission: "attendance:read" },
       { href: "/cameras", label: t.nav.cameras, icon: Camera, permission: "cameras:read" },
       { href: "/reports", label: t.nav.reports, icon: FileBarChart, permission: "reports:read" },
     ],

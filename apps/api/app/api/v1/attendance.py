@@ -76,6 +76,8 @@ def day_out(emp: Employee, r: engine.DayResult) -> DayOut:
         early_leave_minutes=r.early_leave_minutes,
         overtime_minutes=r.overtime_minutes,
         has_manual_events=r.has_manual_events,
+        leave_kind=r.leave_kind,
+        holiday_name=r.holiday_name,
     )
 
 

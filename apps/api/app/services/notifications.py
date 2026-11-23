@@ -149,6 +149,8 @@ def daily_summary(
     branch: str | None = None,
 ) -> str | None:
     """The daily message, or None when nobody is scheduled to work that day."""
+    results = list(results)
+    on_leave += sum(1 for _, r in results if r.status is engine.DayStatus.LEAVE)
     rows = [(e, r) for e, r in results if r.status not in _OFF_STATUSES]
     if not rows:
         return None
@@ -177,13 +179,13 @@ def daily_summary(
             _names([esc(full_name(e)) for e in missing]),
         ]
     if on_leave:
-        lines.append(f"🏖 Taʼtilda: {on_leave}")
+        lines.append(f"🏖 Taʼtil / kasallik / safar: {on_leave}")
     if not late and not missing:
         lines.append("👏 Hamma oʻz vaqtida keldi.")
     return "\n".join(lines)
 
 
-_OFF_STATUSES = {engine.DayStatus.WEEKEND, engine.DayStatus.NOT_SCHEDULED}
+_OFF_STATUSES = engine.OFF_STATUSES
 
 
 def branches_summary(

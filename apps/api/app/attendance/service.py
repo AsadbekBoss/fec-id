@@ -263,6 +263,8 @@ async def compute_range(
         assert ev.employee_id is not None and ev.work_date is not None  # noqa: S101
         by_key[(ev.employee_id, ev.work_date)].append(_punch(ev))
 
+    holidays, leaves = await excused_days(db, ids, date_from, date_to)
+
     t = now()
     out: list[tuple[Employee, engine.DayResult]] = []
     for emp in employees:
@@ -270,16 +272,40 @@ async def compute_range(
         d = date_from
         while d <= date_to:
             if employed_on(emp, d):
-                out.append(
-                    (
-                        emp,
-                        engine.compute_day(
-                            d, by_key.get((emp.id, d), []), schedule, settings.default_tz, t
-                        ),
-                    )
+                r = engine.compute_day(
+                    d, by_key.get((emp.id, d), []), schedule, settings.default_tz, t
                 )
+                holiday = holidays.get((None, d)) or holidays.get((emp.branch_id, d))
+                out.append((emp, engine.excuse(r, holiday, leaves.get((emp.id, d)))))
             d += timedelta(days=1)
     return out
+
+
+async def excused_days(
+    db: AsyncSession, employee_ids: list[uuid.UUID], date_from: date, date_to: date
+) -> tuple[dict[tuple[uuid.UUID | None, date], str], dict[tuple[uuid.UUID, date], str]]:
+    """Holidays by (branch or None, day) -> name; leave by (employee, day) -> kind."""
+    from app.models.absences import EmployeeLeave, Holiday  # local: models import the engine
+
+    holidays: dict[tuple[uuid.UUID | None, date], str] = {}
+    for h in (
+        await db.execute(select(Holiday).where(Holiday.day.between(date_from, date_to)))
+    ).scalars():
+        holidays[(h.branch_id, h.day)] = h.name
+    leaves: dict[tuple[uuid.UUID, date], str] = {}
+    rows = await db.execute(
+        select(EmployeeLeave).where(
+            EmployeeLeave.employee_id.in_(employee_ids),
+            EmployeeLeave.date_from <= date_to,
+            EmployeeLeave.date_to >= date_from,
+        )
+    )
+    for lv in rows.scalars():
+        d = max(lv.date_from, date_from)
+        while d <= min(lv.date_to, date_to):
+            leaves[(lv.employee_id, d)] = lv.kind
+            d += timedelta(days=1)
+    return holidays, leaves
 
 
 # --- camera / terminal event ingestion --------------------------------------------------------

@@ -119,6 +119,7 @@ def main_menu(chat: TelegramRecipient, today: date) -> View:
 
 def date_picker(chat: TelegramRecipient, today: date) -> View:
     days = [today - timedelta(days=i) for i in range(7)]
+
     def target(d: date) -> str:
         return f"rd:{d}" if chat.branch_id is None else f"bd:{chat.branch_id}:{d}"
 

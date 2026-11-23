@@ -1,5 +1,6 @@
 """Import every model so Base.metadata is complete (Alembic autogenerate, tests)."""
 
+from app.models.absences import EmployeeLeave, Holiday
 from app.models.attendance import AttendanceDaily, AttendanceEvent
 from app.models.auth import AuthSession, RefreshToken
 from app.models.biometrics import BiometricConsent, FaceEmbedding
@@ -18,7 +19,9 @@ __all__ = [
     "Camera",
     "Department",
     "Employee",
+    "EmployeeLeave",
     "FaceEmbedding",
+    "Holiday",
     "NotificationLog",
     "RefreshToken",
     "SystemSetting",

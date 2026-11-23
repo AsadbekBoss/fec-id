@@ -30,6 +30,7 @@ import {
   EmployeeStatusBadge,
 } from "@/components/entities";
 import { EmployeeTelegramCard } from "@/components/employee-telegram";
+import { LeavesCard } from "@/components/leaves";
 import { FaceTemplatesCard } from "@/components/face-templates";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -139,6 +140,7 @@ function EmployeeDetail() {
             <FaceTemplatesCard employee={e} onChanged={emp.reload} />
           ) : null}
           <EmployeeTelegramCard employee={e} />
+          {can("attendance:read") ? <LeavesCard employee={e} /> : null}
         </div>
       </div>
 

@@ -26,7 +26,7 @@ from app.attendance import service as att
 from app.models import Branch, Employee
 from app.models.enums import EmployeeStatus
 
-_OFF = {engine.DayStatus.WEEKEND, engine.DayStatus.NOT_SCHEDULED}
+_OFF = engine.OFF_STATUSES
 MONTHS = [
     "yanvar", "fevral", "mart", "aprel", "may", "iyun",
     "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr",

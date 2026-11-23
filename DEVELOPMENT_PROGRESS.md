@@ -416,6 +416,19 @@ Phase 8 was approved by the owner's Phase 9 instruction. The code is in `apps/re
 - `/internal/v1/templates:extract` and `/search` (API_CONTRACTS §4.2) are not implemented. Enrolment from the Core API comes in a later phase. The evaluation uses an encrypted local gallery file.
 - Docker: a Dockerfile and an opt-in compose profile `recognition` are written but **not verified**, because Docker is not installed on this machine.
 
+## Phase 24 — Holidays and employee leave (owner chose "2")
+
+| Item | Status |
+|---|---|
+| Why | ✅ the director's ranking must be fair: people on leave or sick, and holidays, were counted as absent |
+| Data | ✅ migration 0012: `holidays` (day, name, branch_id NULL = every branch; unique per scope) and `employee_leaves` (VACATION / SICK / TRIP / OTHER, date range ≤ 366 days, note); both audited |
+| Engine | ✅ `engine.excuse()` after `compute_day`: no arrival on a holiday → HOLIDAY, inside a leave → LEAVE (holiday wins); arrived anyway → a worked day, no lateness on a holiday. `OFF_STATUSES` (weekend, unscheduled, leave, holiday) are excluded from absences, rankings, Telegram summaries |
+| API | ✅ `GET/POST/DELETE /holidays` (centre view → every branch, branch view → that branch; a branch cannot delete every-branch holidays: 403), `GET/POST/DELETE /leaves` (visible employees only, overlap → 409 `LEAVE_OVERLAP`); day output adds `leave_kind`, `holiday_name` |
+| Reports | ✅ timesheet codes H bayram, T taʼtil, B kasallik, S safar, U uzrli; new "Uzrli" column; day details name the leave kind / holiday |
+| Web | ✅ "Taʼtil va bayramlar" page (leave list + add with employee picker; holidays per year with scope badge), employee page leave card, new day statuses |
+| Tests | ✅ API 389 + engine rules (+5: excuse rules, leave + holiday not absent, branch-only holiday, rights, cross-branch leave hidden, timesheet codes); web 80 (+3) |
+| Owner steps | `npm run stop` → `npm run db:migrate` → `npm start` |
+
 ## Phase 23 — Attendance menu inside the Telegram bot (owner: "telegramning oʻzida boʻlsin")
 
 | Item | Status |

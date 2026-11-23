@@ -65,6 +65,14 @@ class DayStatus(StrEnum):
     WEEKEND = "WEEKEND"
     NOT_SCHEDULED = "NOT_SCHEDULED"
     PENDING = "PENDING"  # working day not over yet and no IN so far (never persisted)
+    LEAVE = "LEAVE"  # working day inside the employee's leave / sick days / business trip
+    HOLIDAY = "HOLIDAY"  # a holiday (for everyone or the employee's branch)
+
+
+# Days that are not expected working days: never absent, not in rankings.
+OFF_STATUSES = frozenset(
+    {DayStatus.WEEKEND, DayStatus.NOT_SCHEDULED, DayStatus.LEAVE, DayStatus.HOLIDAY}
+)
 
 
 @dataclass(frozen=True)
@@ -255,6 +263,30 @@ class DayResult:
     overtime_minutes: int = 0
     has_manual_events: bool = False
     punches: list[Punch] = field(default_factory=list)
+    leave_kind: str | None = None  # VACATION / SICK / TRIP / OTHER when status is LEAVE
+    holiday_name: str | None = None
+
+
+def excuse(r: DayResult, holiday: str | None, leave: str | None) -> DayResult:
+    """Apply a holiday / an employee's leave to a computed working day.
+
+    No arrival: HOLIDAY or LEAVE instead of ABSENT / PENDING (holiday wins). Arrived anyway:
+    stays a worked day, but a holiday has no lateness or early leave."""
+    if r.status in (DayStatus.WEEKEND, DayStatus.NOT_SCHEDULED) or not (holiday or leave):
+        return r
+    if r.first_in is not None:
+        if holiday:
+            r.holiday_name = holiday
+            r.late_minutes = r.early_leave_minutes = 0
+            if r.status is DayStatus.LATE:
+                r.status = DayStatus.PRESENT
+        return r
+    if holiday:
+        r.status, r.holiday_name, r.scheduled_minutes = DayStatus.HOLIDAY, holiday, 0
+    else:
+        r.status, r.leave_kind, r.scheduled_minutes = DayStatus.LEAVE, leave, 0
+    r.in_progress = False
+    return r
 
 
 def _minutes(delta: timedelta) -> int:

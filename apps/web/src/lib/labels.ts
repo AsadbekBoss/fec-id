@@ -28,6 +28,8 @@ export const DAY_STATUS: Record<DayStatus, Label> = {
   WEEKEND: { label: "Dam olish", tone: "neutral" },
   NOT_SCHEDULED: { label: "Jadvalsiz", tone: "neutral" },
   PENDING: { label: "Hali kelmagan", tone: "brand" },
+  LEAVE: { label: "Uzrli (taʼtil)", tone: "neutral" },
+  HOLIDAY: { label: "Bayram", tone: "neutral" },
 };
 
 export const BIOMETRIC_STATUS: Record<BiometricStatus, Label & { hint: string }> = {

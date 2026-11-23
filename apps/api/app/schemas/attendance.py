@@ -229,6 +229,8 @@ class DayOut(BaseModel):
     early_leave_minutes: int
     overtime_minutes: int
     has_manual_events: bool
+    leave_kind: str | None = None  # VACATION / SICK / TRIP / OTHER (status LEAVE)
+    holiday_name: str | None = None
 
 
 class DayDetail(DayOut):

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app import __version__
 from app.api.v1 import (
+    absences,
     attendance,
     auth,
     branches,
@@ -30,6 +31,7 @@ api_router.include_router(departments.router)
 api_router.include_router(employees.router)
 api_router.include_router(employees.biometrics_router)
 api_router.include_router(work_schedules.router)
+api_router.include_router(absences.router)
 api_router.include_router(attendance.router)
 api_router.include_router(cameras.router)
 api_router.include_router(face_templates.router)

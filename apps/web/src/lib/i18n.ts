@@ -21,6 +21,7 @@ export const uz = {
     settings: "Sozlamalar",
     system: "Tizim holati",
     branches: "Filiallar",
+    leaves: "Taʼtil va bayramlar",
     designSystem: "Dizayn tizimi",
     sectionMain: "Asosiy",
     sectionOrg: "Tashkilot",

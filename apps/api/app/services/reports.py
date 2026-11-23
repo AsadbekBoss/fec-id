@@ -32,7 +32,16 @@ STATUS_LABEL = {
     S.WEEKEND: "Dam olish",
     S.NOT_SCHEDULED: "Jadvalsiz",
     S.PENDING: "Hali kelmagan",
+    S.LEAVE: "Taʼtil / uzrli",
+    S.HOLIDAY: "Bayram",
 }
+LEAVE_LABEL = {
+    "VACATION": "Taʼtil",
+    "SICK": "Kasallik",
+    "TRIP": "Xizmat safari",
+    "OTHER": "Uzrli sabab",
+}
+LEAVE_CODE = {"VACATION": "T", "SICK": "B", "TRIP": "S", "OTHER": "U"}
 # One-letter codes for the monthly grid (+ legend in every export).
 STATUS_CODE = {
     S.PRESENT: "+",
@@ -42,11 +51,29 @@ STATUS_CODE = {
     S.WEEKEND: "D",
     S.NOT_SCHEDULED: "J",
     S.PENDING: "·",
+    S.LEAVE: "T",
+    S.HOLIDAY: "H",
 }
 LEGEND = (
     "Belgilar: + keldi, K kechikdi, C chiqish yoʻq, Y kelmadi, D dam olish, J jadvalsiz, "
-    "· hali kelmagan"
+    "· hali kelmagan, H bayram, T taʼtil, B kasallik, S xizmat safari, U uzrli sabab"
 )
+
+
+def status_code(r: engine.DayResult) -> str:
+    if r.status is S.LEAVE and r.leave_kind:
+        return LEAVE_CODE.get(r.leave_kind, "T")
+    return STATUS_CODE[r.status]
+
+
+def status_label(r: engine.DayResult) -> str:
+    if r.status is S.LEAVE and r.leave_kind:
+        return LEAVE_LABEL.get(r.leave_kind, STATUS_LABEL[S.LEAVE])
+    if r.status is S.HOLIDAY and r.holiday_name:
+        return f"Bayram: {r.holiday_name}"
+    return STATUS_LABEL[r.status]
+
+
 WORK_STATUSES = {S.PRESENT, S.LATE, S.INCOMPLETE, S.ABSENT}
 CAME = {S.PRESENT, S.LATE, S.INCOMPLETE}
 
@@ -133,6 +160,7 @@ async def timesheet(
         Column("came", "Keldi", 6, "right"),
         Column("late_days", "Kech.", 6, "right"),
         Column("absent_days", "Kelmadi", 7, "right"),
+        Column("leave_days", "Uzrli", 6, "right"),
         Column("worked", "Ishladi (s:d)", 10, "right"),
         Column("late_minutes", "Kech. (daq)", 11, "right"),
         Column("early_minutes", "Erta ket. (daq)", 13, "right"),
@@ -149,10 +177,10 @@ async def timesheet(
             "department": depts.get(e.department_id, ""),
         }
         worked = late = early = 0
-        counts = {"work_days": 0, "came": 0, "late_days": 0, "absent_days": 0}
+        counts = {"work_days": 0, "came": 0, "late_days": 0, "absent_days": 0, "leave_days": 0}
         for d, k in zip(days, day_keys, strict=True):
             day = mine.get(d)
-            row[k] = STATUS_CODE[day.status] if day else ""
+            row[k] = status_code(day) if day else ""
             if day is None:
                 continue
             r = day
@@ -163,13 +191,14 @@ async def timesheet(
             counts["came"] += r.status in CAME
             counts["late_days"] += r.status is S.LATE
             counts["absent_days"] += r.status is S.ABSENT
+            counts["leave_days"] += r.status is S.LEAVE
             if r.status not in (S.WEEKEND,) or r.first_in:
                 detail_rows.append(
                     {
                         "date": d.isoformat(),
                         "code": e.employee_code,
                         "name": _name(e),
-                        "status": STATUS_LABEL[r.status],
+                        "status": status_label(r),
                         "in": _local(r.first_in, tz),
                         "out": _local(r.last_out, tz),
                         "worked": hm(r.worked_minutes),

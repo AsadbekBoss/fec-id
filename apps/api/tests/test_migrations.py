@@ -36,6 +36,8 @@ EXPECTED_TABLES = {
     "telegram_recipients",
     "notification_log",
     "branches",
+    "holidays",
+    "employee_leaves",
 }
 
 
